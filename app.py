@@ -106,7 +106,19 @@ def main():
 
             try:
                 image = Image.open(current_image_path)
-                st.image(image, caption=current_image_name, use_column_width=True)
+                # Изменение размера изображения до 48 пикселей по вертикали
+                original_width, original_height = image.size
+                new_height = 48
+                new_width = int(original_width * (new_height / original_height))
+                image = image.resize((new_width, new_height), Image.LANCZOS)
+
+                # Явно указываем ширину и высоту для st.image
+                st.image(
+                    image,
+                    caption=current_image_name,
+                    width=new_width,
+                    use_column_width=False,
+                )
             except Exception as e:
                 st.error(f"Ошибка при загрузке изображения {current_image_name}: {e}")
 
