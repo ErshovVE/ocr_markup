@@ -112,13 +112,8 @@ def main():
                 new_width = int(original_width * (new_height / original_height))
                 image = image.resize((new_width, new_height), Image.LANCZOS)
 
-                # Явно указываем ширину и высоту для st.image
-                st.image(
-                    image,
-                    caption=current_image_name,
-                    width=new_width,
-                    use_column_width=False,
-                )
+                # Явно указываем ширину и высоту для st.image и убираем подпись
+                st.image(image, width=new_width, use_column_width=False)
             except Exception as e:
                 st.error(f"Ошибка при загрузке изображения {current_image_name}: {e}")
 
