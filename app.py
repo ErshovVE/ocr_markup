@@ -1,7 +1,9 @@
-import streamlit as st
-import os
 import glob
+import os
+
+import streamlit as st
 from PIL import Image
+
 
 st.set_page_config(layout="wide")
 
@@ -166,7 +168,7 @@ def main():
                         < len(st.session_state.image_files) - 1
                     ):
                         st.session_state.current_image_idx += 1
-                    st.experimental_rerun()
+                    st.rerun()
 
             # Кнопки навигации должны быть вне формы
             col_nav1, col_nav2 = st.columns([1, 1])
@@ -178,7 +180,7 @@ def main():
                     key="prev_button",
                 ):
                     st.session_state.current_image_idx -= 1
-                    st.experimental_rerun()
+                    st.rerun()
 
             with col_nav2:
                 if st.button(
@@ -190,7 +192,7 @@ def main():
                     key="next_button",
                 ):
                     st.session_state.current_image_idx += 1
-                    st.experimental_rerun()
+                    st.rerun()
 
             st.markdown(
                 "--- Отредактируйте текст при необходимости и нажмите 'Подтвердить' для сохранения и перехода к следующему изображению. ---"

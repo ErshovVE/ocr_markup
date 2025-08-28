@@ -1,0 +1,1 @@
+pyinstaller --onefile --add-data "app.py;." wrapper.py --hidden-import "streamlit" --copy-metadata "streamlit" --collect-submodules "streamlit" --collect-all "streamlit"
