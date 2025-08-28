@@ -32,7 +32,7 @@ def main():
             }
             st.info(f"Загружен файл разметки: {gt_file_path}")
             # Отмечаем все загруженные изображения как размеченные
-            st.session_state.marked_images = set(st.session_state.annotations.keys())
+            # st.session_state.marked_images = set(st.session_state.annotations.keys())
         else:
             st.session_state.annotations = {}
             st.warning(
@@ -53,8 +53,18 @@ def main():
         st.session_state.image_files = image_files
         if "current_image_idx" not in st.session_state:
             st.session_state.current_image_idx = 0
-        if "marked_images" not in st.session_state:
-            st.session_state.marked_images = set()
+
+        # Инициализация status_icons
+        st.session_state.status_icons = {}
+        for img_name in image_files:
+            if img_name not in st.session_state.annotations:
+                st.session_state.status_icons[img_name] = (
+                    "❌"  # Красный крестик, если нет разметки
+                )
+            else:
+                st.session_state.status_icons[img_name] = (
+                    "❓"  # Серый знак вопроса, если есть разметка, но не подтверждена в текущей сессии
+                )
 
     else:
         return
@@ -67,8 +77,10 @@ def main():
             st.subheader("Список изображений")
             for i, img_name in enumerate(st.session_state.image_files):
                 display_name = img_name
-                if img_name in st.session_state.marked_images:
-                    display_name += " ✅"
+                icon = st.session_state.status_icons.get(
+                    img_name, ""
+                )  # Получаем иконку статуса
+                display_name = f"{display_name} {icon}"
                 if st.button(display_name, key=f"img_select_{i}"):
                     st.session_state.current_image_idx = i
 
@@ -113,7 +125,9 @@ def main():
                     st.session_state.annotations[current_image_name] = (
                         st.session_state.current_text_annotation
                     )
-                    st.session_state.marked_images.add(current_image_name)
+                    st.session_state.status_icons[current_image_name] = (
+                        "✅"  # Отмечаем как размеченное зеленой галочкой
+                    )
 
                     # Сохраняем данные в rec_gt.txt после каждого подтверждения
                     gt_file_path = os.path.join(
