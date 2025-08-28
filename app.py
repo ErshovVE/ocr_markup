@@ -22,7 +22,7 @@ def main():
         if not os.path.isdir(working_dir):
             st.error("Указанная папка не существует.")
             return
-        st.success(f"Рабочая папка: {working_dir}")
+        # st.success(f"Рабочая папка: {working_dir}")
 
         # Изменяем rec_file_path на gt_file_path и всегда используем rec_gt.txt
         gt_file_path = os.path.join(working_dir, "rec_gt.txt")
@@ -34,9 +34,7 @@ def main():
                 for line in lines
                 if "\t" in line
             }
-            st.info(f"Загружен файл разметки: {gt_file_path}")
-            # Отмечаем все загруженные изображения как размеченные
-            # st.session_state.marked_images = set(st.session_state.annotations.keys())
+            # st.info(f"Загружен файл разметки: {gt_file_path}")
         else:
             st.session_state.annotations = {}
             st.warning(
@@ -82,7 +80,7 @@ def main():
         if os.path.exists(status_cache_file_path):
             with open(status_cache_file_path, "r", encoding="utf-8") as f:
                 st.session_state.cached_marked_images = set(f.read().splitlines())
-            st.info(f"Загружен кэш статусов: {status_cache_file_path}")
+            # st.info(f"Загружен кэш статусов: {status_cache_file_path}")
         else:
             st.session_state.cached_marked_images = set()
             st.warning(
@@ -108,7 +106,7 @@ def main():
         with col1:
             st.subheader("Список изображений")
             # Используем st.container с фиксированной высотой для прокрутки списка изображений
-            with st.container(height=600):
+            with st.container(height=700):
                 for i, img_name in enumerate(st.session_state.image_files):
                     display_name = img_name
                     icon = st.session_state.status_icons.get(
