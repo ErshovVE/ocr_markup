@@ -3,6 +3,8 @@ import os
 import glob
 from PIL import Image
 
+st.set_page_config(layout="wide")
+
 
 def main():
     st.title("Инструмент разметки OCR")
@@ -54,17 +56,24 @@ def main():
         if "current_image_idx" not in st.session_state:
             st.session_state.current_image_idx = 0
 
-        # Инициализация status_icons
-        st.session_state.status_icons = {}
-        for img_name in image_files:
-            if img_name not in st.session_state.annotations:
-                st.session_state.status_icons[img_name] = (
-                    "❌"  # Красный крестик, если нет разметки
-                )
-            else:
-                st.session_state.status_icons[img_name] = (
-                    "❓"  # Серый знак вопроса, если есть разметка, но не подтверждена в текущей сессии
-                )
+        # Инициализация/обновление status_icons
+        if (
+            "status_icons" not in st.session_state
+            or st.session_state.get("last_working_dir") != working_dir
+            or st.session_state.get("last_image_files") != image_files
+        ):
+            st.session_state.status_icons = {}
+            for img_name in image_files:
+                if img_name not in st.session_state.annotations:
+                    st.session_state.status_icons[img_name] = (
+                        "❌"  # Красный крестик, если нет разметки
+                    )
+                else:
+                    st.session_state.status_icons[img_name] = (
+                        "❓"  # Серый знак вопроса, если есть разметка, но не подтверждена в текущей сессии
+                    )
+            st.session_state.last_working_dir = working_dir
+            st.session_state.last_image_files = image_files
 
     else:
         return
@@ -75,14 +84,16 @@ def main():
 
         with col1:
             st.subheader("Список изображений")
-            for i, img_name in enumerate(st.session_state.image_files):
-                display_name = img_name
-                icon = st.session_state.status_icons.get(
-                    img_name, ""
-                )  # Получаем иконку статуса
-                display_name = f"{display_name} {icon}"
-                if st.button(display_name, key=f"img_select_{i}"):
-                    st.session_state.current_image_idx = i
+            # Используем st.container с фиксированной высотой для прокрутки списка изображений
+            with st.container(height=600):
+                for i, img_name in enumerate(st.session_state.image_files):
+                    display_name = img_name
+                    icon = st.session_state.status_icons.get(
+                        img_name, ""
+                    )  # Получаем иконку статуса
+                    display_name = f"{display_name} {icon}"
+                    if st.button(display_name, key=f"img_select_{i}"):
+                        st.session_state.current_image_idx = i
 
         with col2:
             current_image_name = st.session_state.image_files[
@@ -175,7 +186,7 @@ def main():
                     st.experimental_rerun()
 
             st.markdown(
-                "--- Редактировать текст и нажать 'Подтвердить' для сохранения и перехода к следующему изображению. ---"
+                "--- Отредактируйте текст при необходимости и нажмите 'Подтвердить' для сохранения и перехода к следующему изображению. ---"
             )
 
 
