@@ -77,6 +77,27 @@ def main():
             st.session_state.last_working_dir = working_dir
             st.session_state.last_image_files = image_files
 
+        # Загрузка/создание файла кэша статусов
+        status_cache_file_path = os.path.join(working_dir, "status_cache.txt")
+        if os.path.exists(status_cache_file_path):
+            with open(status_cache_file_path, "r", encoding="utf-8") as f:
+                st.session_state.cached_marked_images = set(f.read().splitlines())
+            st.info(f"Загружен кэш статусов: {status_cache_file_path}")
+        else:
+            st.session_state.cached_marked_images = set()
+            st.warning(
+                f"Файл кэша статусов {status_cache_file_path} не найден. Создан пустой кэш."
+            )
+
+        # Обновляем status_icons на основе cached_marked_images
+        for img_name in image_files:
+            if img_name in st.session_state.cached_marked_images:
+                st.session_state.status_icons[img_name] = "✅"
+            elif img_name not in st.session_state.annotations:
+                st.session_state.status_icons[img_name] = "❌"
+            else:
+                st.session_state.status_icons[img_name] = "❓"
+
     else:
         return
 
@@ -149,7 +170,19 @@ def main():
                         "✅"  # Отмечаем как размеченное зеленой галочкой
                     )
 
-                    # Сохраняем данные в rec_gt.txt после каждого подтверждения
+                    # Обновляем кэш отмеченных изображений
+                    st.session_state.cached_marked_images.add(current_image_name)
+                    status_cache_file_path = os.path.join(
+                        st.session_state.working_dir, "status_cache.txt"
+                    )
+                    with open(status_cache_file_path, "w", encoding="utf-8") as f:
+                        for img_name in st.session_state.cached_marked_images:
+                            f.write(f"{img_name}\n")
+                    st.info(
+                        f"Статус для {current_image_name} сохранен в {status_cache_file_path}"
+                    )
+
+                    # Сохраняем данные разметки в rec_gt.txt после каждого подтверждения
                     gt_file_path = os.path.join(
                         st.session_state.working_dir, "rec_gt.txt"
                     )
