@@ -7,19 +7,24 @@ st.set_page_config(layout="wide")
 
 
 @st.cache_data
-def load_and_resize_image(image_path):
-    """Загружает и изменяет размер изображения до 48px по вертикали, сохраняя пропорции."""
+def load_and_resize_image(image_path, max_height=100, max_width=1000):
+    """Загружает и изменяет размер изображения, кешируя результат."""
     try:
-        image = Image.open(image_path)
+        image = Image.open(image_path).convert("RGB")
         original_width, original_height = image.size
-        new_height = 48
-        new_width = int(original_width * (new_height / original_height))
+
+        height_ratio = max_height / original_height
+        width_ratio = max_width / original_width
+        scale = min(height_ratio, width_ratio)
+
+        new_width = int(original_width * scale)
+        new_height = int(original_height * scale)
+
         image = image.resize((new_width, new_height), Image.LANCZOS)
-        return image, new_width
+        return image
+
     except Exception as e:
-        st.error(
-            f"Ошибка при загрузке или изменении размера изображения {image_path}: {e}"
-        )
+        st.error(f"Ошибка загрузки или изменения размера изображения {image_path}: {e}")
         return None, None
 
 
@@ -126,6 +131,13 @@ def main():
         [data-testid="stStatusWidget"] {visibility: hidden;}
         header {visibility: hidden;}
         .block-container {padding-top: 1rem; padding-bottom: 1rem;}
+
+        /* Стили для рамки вокруг изображения */
+        img {
+            border: 2px solid blue;
+            box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2);
+        }
+
         </style>
     """
     st.markdown(custom_css, unsafe_allow_html=True)
@@ -311,10 +323,11 @@ def main():
 
             # st3 = time.time() # Удаляем таймер
             try:
-                image, new_width = load_and_resize_image(current_full_image_path)
+                image = load_and_resize_image(
+                    current_full_image_path, max_height=80, max_width=1200
+                )
                 if image:
-                    # Явно указываем ширину и высоту для st.image и убираем подпись
-                    st.image(image, width=new_width, use_column_width=False)
+                    st.image(image)
             except Exception as e:
                 st.error(f"Ошибка при загрузке изображения {current_image_name}: {e}")
             # print(f"Время отображения текущего изображения: {time.time() - st3}") # Удаляем таймер
