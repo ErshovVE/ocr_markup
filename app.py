@@ -1,6 +1,5 @@
 import streamlit as st
 import os
-import glob
 from PIL import Image
 
 st.set_page_config(layout="wide")
@@ -20,7 +19,7 @@ def load_and_resize_image(image_path, max_height=100, max_width=1000):
         new_width = int(original_width * scale)
         new_height = int(original_height * scale)
 
-        image = image.resize((new_width, new_height), Image.LANCZOS)
+        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
         return image
 
     except Exception as e:
@@ -117,9 +116,6 @@ def load_annotation_data(
 
     except Exception as e:
         return {}, [], [], {}, set(), f"Ошибка при загрузке данных аннотации: {e}"
-
-
-import time
 
 
 def main():
@@ -248,190 +244,334 @@ def main():
         st.warning("Пожалуйста, загрузите файл разметки.")
         return
 
-    # Удаляем отладочные сообщения времени
-    # st1 = time.time()
-
     # Отображение основной части приложения только если файл разметки загружен и есть изображения
     if "image_files" in st.session_state and st.session_state.image_files:
-        col1, col2 = st.columns([1, 2])
+        if "filter_option" not in st.session_state:
+            st.session_state.filter_option = "Все изображения"
 
-        # Управление пагинацией
-        total_images = len(st.session_state.image_files)
+        # Отфильтровываем изображения в зависимости от выбранной опции
+        if st.session_state.filter_option == "Только неразмеченные":
+            display_image_files = [
+                f_path
+                for f_path in st.session_state.image_files
+                if st.session_state.status_icons.get(os.path.basename(f_path), "❌")
+                != "✅"
+            ]
+        elif st.session_state.filter_option == "Только размеченные":
+            display_image_files = [
+                f_path
+                for f_path in st.session_state.image_files
+                if st.session_state.status_icons.get(os.path.basename(f_path), "❌")
+                == "✅"
+            ]
+        else:  # "Все изображения"
+            display_image_files = st.session_state.image_files
+
+        total_images = len(display_image_files)
         total_pages = (
             total_images + st.session_state.page_size - 1
         ) // st.session_state.page_size
 
-        prev_page_col, page_info_col, next_page_col = st.columns([1, 2, 1])
-        with prev_page_col:
-            if st.button(
-                "← Предыдущая страница",
-                disabled=(st.session_state.current_page == 0),
-                key="prev_page_button",
-            ):
-                st.session_state.current_page -= 1
-                # Устанавливаем current_image_idx на первое изображение новой страницы
-                st.session_state.current_image_idx = (
-                    st.session_state.current_page * st.session_state.page_size
+        # Если изображений нет после фильтрации, выводим предупреждение и завершаем отображение этой части UI
+        if total_images == 0:
+            st.warning("Нет изображений для разметки по текущему фильтру.")
+            # Сбрасываем current_image_idx, если он неактуален
+            st.session_state.current_image_idx = 0
+            # Здесь мы не возвращаемся из main(), чтобы остальная часть приложения (загрузка файла) работала.
+            # Вместо этого, мы просто не рендерим col1 и col2.
+        else:  # Только если есть изображения, создаем колонки и рендерим их содержимое
+            # Если текущая страница или индекс изображения выходят за пределы нового отфильтрованного списка
+            if st.session_state.current_page >= total_pages:
+                st.session_state.current_page = (
+                    total_pages - 1 if total_pages > 0 else 0
                 )
-                st.rerun()
-        with page_info_col:
-            st.write(f"Страница {st.session_state.current_page + 1} из {total_pages}")
-        with next_page_col:
-            if st.button(
-                "Следующая страница →",
-                disabled=(st.session_state.current_page >= total_pages - 1),
-                key="next_page_button",
-            ):
-                st.session_state.current_page += 1
-                # Устанавливаем current_image_idx на первое изображение новой страницы
-                st.session_state.current_image_idx = (
-                    st.session_state.current_page * st.session_state.page_size
-                )
-                st.rerun()
 
-        start_index = st.session_state.current_page * st.session_state.page_size
-        end_index = min(start_index + st.session_state.page_size, total_images)
-
-        with col1:
-            st.subheader("Список изображений")
-            # Используем st.container с фиксированной высотой для прокрутки списка изображений
-            # st2 = time.time() # Удаляем таймер
-            with st.container(height=400):
-                for i_offset, full_path in enumerate(
-                    st.session_state.image_files[start_index:end_index]
-                ):
-                    i = start_index + i_offset  # Актуальный индекс в полном списке
-                    img_name = os.path.basename(full_path)
-                    display_name = img_name
-                    icon = st.session_state.status_icons.get(
-                        img_name, ""
-                    )  # Получаем иконку статуса
-                    display_name = f"{display_name} {icon}"
-                    if st.button(display_name, key=f"img_select_{i}"):
-                        st.session_state.current_image_idx = i
-                        # Убедимся, что выбранное изображение на текущей странице
-                        st.session_state.current_page = i // st.session_state.page_size
-                        st.rerun()
-            # print(f"Время отображения списка изображений: {time.time() - st2}") # Удаляем таймер
-
-        with col2:
-            current_full_image_path = st.session_state.image_files[
-                st.session_state.current_image_idx
-            ]
-            current_image_name = os.path.basename(current_full_image_path)
-            st.subheader(f"Текущее изображение: {current_image_name}")
-
-            # st3 = time.time() # Удаляем таймер
+            # Убедимся, что current_image_idx указывает на действительное изображение в ОТФИЛЬТРОВАННОМ списке
+            # и что оно находится на текущей странице.
+            # Сначала найдем текущий original_index_in_full_list в display_image_files.
             try:
-                image = load_and_resize_image(
-                    current_full_image_path, max_height=80, max_width=1200
+                current_global_idx_in_filtered = display_image_files.index(
+                    st.session_state.image_files[st.session_state.current_image_idx]
                 )
-                if image:
-                    st.image(image)
-            except Exception as e:
-                st.error(f"Ошибка при загрузке изображения {current_image_name}: {e}")
-            # print(f"Время отображения текущего изображения: {time.time() - st3}") # Удаляем таймер
-
-            default_text = st.session_state.annotations.get(current_image_name, "")
-
-            with st.form(key=f"annotation_form_{current_image_name}"):
-                st.session_state.current_text_annotation = st.text_input(
-                    "Текст с изображения",
-                    value=default_text,
-                    key=f"text_input_form_{current_image_name}",
+                # Если текущий global_idx_in_filtered не на текущей странице, перейдем на страницу этого изображения
+                expected_page_for_current_image = (
+                    current_global_idx_in_filtered // st.session_state.page_size
                 )
-                # Обработка переносов строки - замена на пробелы
-                st.session_state.current_text_annotation = (
-                    st.session_state.current_text_annotation.replace("\n", " ").replace(
-                        "\r", " "
-                    )
+                if st.session_state.current_page != expected_page_for_current_image:
+                    st.session_state.current_page = expected_page_for_current_image
+            except (
+                ValueError
+            ):  # текущее изображение не найдено в отфильтрованном списке
+                st.session_state.current_image_idx = st.session_state.image_files.index(
+                    display_image_files[0]
+                )  # Переходим к первому изображению в отфильтрованном списке
+                st.session_state.current_page = 0
+                st.rerun()  # Нужно перезапустить, чтобы обновить UI
+
+            start_index = st.session_state.current_page * st.session_state.page_size
+            end_index = min(start_index + st.session_state.page_size, total_images)
+
+            col1, col2 = st.columns([1, 2])
+
+            with col1:
+                st.subheader("Список изображений")
+
+                def on_filter_change():
+                    st.session_state.current_page = 0
+                    new_filter_option = st.session_state.filter_radio
+                    st.session_state.filter_option = new_filter_option
+
+                    # Временно вычисляем новый отфильтрованный список, чтобы найти первое изображение
+                    if new_filter_option == "Только неразмеченные":
+                        temp_display_image_files = [
+                            f_path
+                            for f_path in st.session_state.image_files
+                            if st.session_state.status_icons.get(
+                                os.path.basename(f_path), "❌"
+                            )
+                            != "✅"
+                        ]
+                    elif new_filter_option == "Только размеченные":
+                        temp_display_image_files = [
+                            f_path
+                            for f_path in st.session_state.image_files
+                            if st.session_state.status_icons.get(
+                                os.path.basename(f_path), "❌"
+                            )
+                            == "✅"
+                        ]
+                    else:  # "Все изображения"
+                        temp_display_image_files = st.session_state.image_files
+
+                    if temp_display_image_files:
+                        # Устанавливаем current_image_idx на оригинальный индекс первого изображения в новом отфильтрованном списке
+                        st.session_state.current_image_idx = (
+                            st.session_state.image_files.index(
+                                temp_display_image_files[0]
+                            )
+                        )
+                    else:
+                        # Если нет изображений по новому фильтру, сбросим current_image_idx в 0
+                        st.session_state.current_image_idx = 0
+
+                    st.rerun()
+
+                st.radio(
+                    "Показать:",
+                    ("Все изображения", "Только неразмеченные", "Только размеченные"),
+                    key="filter_radio",
+                    index=(
+                        (
+                            "Все изображения",
+                            "Только неразмеченные",
+                            "Только размеченные",
+                        ).index(st.session_state.filter_option)
+                    ),
+                    on_change=on_filter_change,
                 )
 
-                col_form1, col_form2 = st.columns([1, 2])
-                with col_form1:
-                    submit_button = st.form_submit_button("Подтвердить")
-                with col_form2:
-                    pass
+                # Список изображений
+                with st.container(height=400):
+                    # Используем display_image_files для отображения
+                    for full_path in display_image_files[start_index:end_index]:
+                        original_index_in_full_list = (
+                            st.session_state.image_files.index(full_path)
+                        )
+                        img_name = os.path.basename(full_path)
+                        status_icon = st.session_state.status_icons.get(img_name, "❌")
+                        display_name = f"{status_icon} {img_name}"
 
-                if submit_button:
-                    st.session_state.annotations[current_image_name] = (
-                        st.session_state.current_text_annotation
+                        # Отмечаем текущее изображение в списке. current_image_idx должен соответствовать оригинальному индексу.
+                        if (
+                            original_index_in_full_list
+                            == st.session_state.current_image_idx
+                        ):
+                            st.markdown(f"**-> {display_name}**")
+                        else:
+                            if st.button(
+                                display_name,
+                                key=f"img_select_{original_index_in_full_list}",
+                            ):
+                                st.session_state.current_image_idx = (
+                                    original_index_in_full_list
+                                )
+                                st.session_state.current_page = (
+                                    original_index_in_full_list
+                                    // st.session_state.page_size
+                                )  # Корректируем страницу
+                                st.rerun()
+
+                # Кнопки пагинации (создаются только если total_images > 0)
+                prev_page_col, page_info_col, next_page_col = st.columns([1, 2, 1])
+                with prev_page_col:
+                    if st.button(
+                        "← Предыдущая страница",
+                        disabled=(st.session_state.current_page == 0),
+                        key="prev_page_button",
+                    ):
+                        st.session_state.current_page -= 1
+                        # Убедимся, что current_image_idx соответствует первой картинке на новой странице в отфильтрованном списке
+                        # и найдем ее реальный индекс в st.session_state.image_files
+                        first_image_on_page_path = display_image_files[
+                            st.session_state.current_page * st.session_state.page_size
+                        ]
+                        st.session_state.current_image_idx = (
+                            st.session_state.image_files.index(first_image_on_page_path)
+                        )
+                        st.rerun()
+                with page_info_col:
+                    st.markdown(
+                        f"Страница {st.session_state.current_page + 1} из {total_pages}"
                     )
-                    st.session_state.status_icons[current_image_name] = (
-                        "✅"  # Отмечаем как размеченное зеленой галочкой
+                with next_page_col:
+                    if st.button(
+                        "Следующая страница →",
+                        disabled=(st.session_state.current_page == total_pages - 1),
+                        key="next_page_button",
+                    ):
+                        st.session_state.current_page += 1
+                        # Убедимся, что current_image_idx соответствует первой картинке на новой странице в отфильтрованном списке
+                        # и найдем ее реальный индекс в st.session_state.image_files
+                        first_image_on_page_path = display_image_files[
+                            st.session_state.current_page * st.session_state.page_size
+                        ]
+                        st.session_state.current_image_idx = (
+                            st.session_state.image_files.index(first_image_on_page_path)
+                        )
+                        st.rerun()
+
+            with col2:
+                # Получаем текущее изображение из оригинального списка
+                current_full_image_path = st.session_state.image_files[
+                    st.session_state.current_image_idx
+                ]
+                current_image_name = os.path.basename(current_full_image_path)
+                st.subheader(f"Текущее изображение: {current_image_name}")
+
+                # st3 = time.time() # Удаляем таймер
+                try:
+                    image = load_and_resize_image(
+                        current_full_image_path, max_height=80, max_width=1200
+                    )
+                    if image:
+                        st.image(image)
+                except Exception as e:
+                    st.error(
+                        f"Ошибка при загрузке изображения {current_image_name}: {e}"
+                    )
+                # print(f"Время отображения текущего изображения: {time.time() - st3}") # Удаляем таймер
+
+                default_text = st.session_state.annotations.get(current_image_name, "")
+
+                with st.form(key=f"annotation_form_{current_image_name}"):
+                    st.session_state.current_text_annotation = st.text_input(
+                        "Текст с изображения",
+                        value=default_text,
+                        key=f"text_input_form_{current_image_name}",
+                    )
+                    # Обработка переносов строки - замена на пробелы
+                    st.session_state.current_text_annotation = (
+                        st.session_state.current_text_annotation.replace(
+                            "\n", " "
+                        ).replace("\r", " ")
                     )
 
-                    # Обновляем кэш отмеченных изображений (храним basename)
-                    st.session_state.cached_marked_images.add(current_image_name)
-                    status_cache_file_path = os.path.join(
-                        st.session_state.working_dir, "status_cache.txt"
-                    )
-                    with open(status_cache_file_path, "w", encoding="utf-8") as f:
-                        for img_name in st.session_state.cached_marked_images:
-                            f.write(f"{img_name}\n")
-                    st.info(
-                        f"Статус для {current_image_name} сохранен в {status_cache_file_path}"
-                    )
+                    col_form1, col_form2 = st.columns([1, 2])
+                    with col_form1:
+                        submit_button = st.form_submit_button("Подтвердить")
+                    with col_form2:
+                        pass
 
-                    # Сохраняем данные разметки в файл аннотаций после каждого подтверждения (храним относительный путь)
-                    annotation_file_path = st.session_state.annotation_file_path
-                    with open(annotation_file_path, "w", encoding="utf-8") as f:
-                        for relative_path_for_saving in (
-                            st.session_state.original_relative_paths_for_saving
-                        ):  # Итерируемся по оригинальному списку относительных путей
-                            img_name_for_saving = os.path.basename(
-                                os.path.normpath(
-                                    os.path.join(
-                                        st.session_state.image_base_directory,
-                                        relative_path_for_saving,
+                    if submit_button:
+                        st.session_state.annotations[current_image_name] = (
+                            st.session_state.current_text_annotation
+                        )
+                        st.session_state.status_icons[current_image_name] = (
+                            "✅"  # Отмечаем как размеченное зеленой галочкой
+                        )
+
+                        # Обновляем кэш отмеченных изображений (храним basename)
+                        st.session_state.cached_marked_images.add(current_image_name)
+                        status_cache_file_path = os.path.join(
+                            st.session_state.working_dir, "status_cache.txt"
+                        )
+                        with open(status_cache_file_path, "w", encoding="utf-8") as f:
+                            for img_name in st.session_state.cached_marked_images:
+                                f.write(f"{img_name}\n")
+                        st.info(
+                            f"Статус для {current_image_name} сохранен в {status_cache_file_path}"
+                        )
+
+                        # Сохраняем данные разметки в файл аннотаций после каждого подтверждения (храним относительный путь)
+                        annotation_file_path = st.session_state.annotation_file_path
+                        with open(annotation_file_path, "w", encoding="utf-8") as f:
+                            for relative_path_for_saving in st.session_state.original_relative_paths_for_saving:  # Итерируемся по оригинальному списку относительных путей
+                                img_name_for_saving = os.path.basename(
+                                    os.path.normpath(
+                                        os.path.join(
+                                            st.session_state.image_base_directory,
+                                            relative_path_for_saving,
+                                        )
                                     )
                                 )
-                            )
-                            annotation_text_to_save = st.session_state.annotations.get(
-                                img_name_for_saving, ""
-                            )
-                            f.write(
-                                f"{relative_path_for_saving}\t{annotation_text_to_save}\n"
-                            )
+                                annotation_text_to_save = (
+                                    st.session_state.annotations.get(
+                                        img_name_for_saving, ""
+                                    )
+                                )
+                                f.write(
+                                    f"{relative_path_for_saving}\t{annotation_text_to_save}\n"
+                                )
 
-                    st.success(
-                        f"Данные для {current_image_name} сохранены в {annotation_file_path}"
-                    )
+                        st.success(
+                            f"Данные для {current_image_name} сохранены в {annotation_file_path}"
+                        )
 
-                    if (
-                        st.session_state.current_image_idx
-                        < len(st.session_state.image_files) - 1
+                        if (
+                            st.session_state.current_image_idx
+                            < len(st.session_state.image_files) - 1
+                        ):
+                            st.session_state.current_image_idx += 1
+                        st.rerun()
+
+                # Кнопки навигации должны быть вне формы
+                col_nav1, col_nav2 = st.columns([1, 1])
+
+                with col_nav1:
+                    if st.button(
+                        "← Предыдущее",
+                        disabled=(st.session_state.current_image_idx == 0),
+                        key="prev_button",
+                    ):
+                        st.session_state.current_image_idx -= 1
+                        st.rerun()
+
+                with col_nav2:
+                    if st.button(
+                        "Следующее →",
+                        disabled=(
+                            st.session_state.current_image_idx
+                            == len(st.session_state.image_files) - 1
+                        ),
+                        key="next_button",
                     ):
                         st.session_state.current_image_idx += 1
-                    st.rerun()
+                        st.rerun()
 
-            # Кнопки навигации должны быть вне формы
-            col_nav1, col_nav2 = st.columns([1, 1])
+                st.markdown(
+                    "--- Отредактируйте текст при необходимости и нажмите 'Подтвердить' для сохранения и перехода к следующему изображению. ---"
+                )
 
-            with col_nav1:
-                if st.button(
-                    "← Предыдущее",
-                    disabled=(st.session_state.current_image_idx == 0),
-                    key="prev_button",
-                ):
-                    st.session_state.current_image_idx -= 1
-                    st.rerun()
-
-            with col_nav2:
-                if st.button(
-                    "Следующее →",
-                    disabled=(
-                        st.session_state.current_image_idx
-                        == len(st.session_state.image_files) - 1
-                    ),
-                    key="next_button",
-                ):
-                    st.session_state.current_image_idx += 1
-                    st.rerun()
-
-            st.markdown(
-                "--- Отредактируйте текст при необходимости и нажмите 'Подтвердить' для сохранения и перехода к следующему изображению. ---"
+            # Обновление current_page, если current_image_idx изменился (например, через навигацию кнопками)
+            # Это нужно для синхронизации, если current_image_idx меняется вне пагинации
+            expected_page = (
+                st.session_state.current_image_idx // st.session_state.page_size
             )
+            if st.session_state.current_page != expected_page:
+                st.session_state.current_page = expected_page
+                st.rerun()
+
+    # Сохраняем все размеченные данные в файл, когда st.session_state.annotations обновляется
 
 
 if __name__ == "__main__":
