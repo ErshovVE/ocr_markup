@@ -118,6 +118,18 @@ import time
 
 
 def main():
+    # CSS для более компактного интерфейса и уменьшения заголовка
+    custom_css = """
+        <style>
+        [data-testid="stToolbar"] {visibility: hidden;}
+        [data-testid="stDecoration"] {visibility: hidden;}
+        [data-testid="stStatusWidget"] {visibility: hidden;}
+        header {visibility: hidden;}
+        .block-container {padding-top: 1rem; padding-bottom: 1rem;}
+        </style>
+    """
+    st.markdown(custom_css, unsafe_allow_html=True)
+
     st.title("Инструмент разметки OCR")
 
     if "annotation_file_path" not in st.session_state:
@@ -272,7 +284,7 @@ def main():
             st.subheader("Список изображений")
             # Используем st.container с фиксированной высотой для прокрутки списка изображений
             # st2 = time.time() # Удаляем таймер
-            with st.container(height=300):
+            with st.container(height=400):
                 for i_offset, full_path in enumerate(
                     st.session_state.image_files[start_index:end_index]
                 ):
