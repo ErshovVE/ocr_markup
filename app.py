@@ -173,15 +173,15 @@ def main():
         if "image_base_directory" not in st.session_state:
             st.session_state.image_base_directory = ""
         image_base_directory = st.text_input(
-            "Укажите базовую папку для изображений (где находился ваш файл разметки)",
+            "Укажите рабочую директорию",
             value=st.session_state.image_base_directory,
         )
 
         if not image_base_directory:
-            st.warning("Пожалуйста, укажите базовую папку для изображений.")
+            st.warning("Пожалуйста, укажите рабочую директорию.")
             return
         if not os.path.isdir(image_base_directory):
-            st.error("Указанная базовая папка не существует.")
+            st.error("Указанная рабочая директория не существует.")
             return
         # Вызываем кэшированную функцию для загрузки всех данных
         (

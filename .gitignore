@@ -209,4 +209,6 @@ __marimo__/
 
 *.txt
 *.ipynb
+!predict.ipynb
 *core/config.py
+images/
