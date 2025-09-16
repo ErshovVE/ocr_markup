@@ -523,6 +523,8 @@ def main():
                                     f"{relative_path_for_saving}\t{annotation_text_to_save}\n"
                                 )
 
+                        load_annotation_data.clear()  # Очищаем кэш, чтобы данные перезагрузились
+
                         st.success(
                             f"Данные для {current_image_name} сохранены в {annotation_file_path}"
                         )
