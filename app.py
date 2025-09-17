@@ -22,7 +22,7 @@ def load_and_resize_image(image_path, max_height=100, max_width=1000):
         image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
         return image
 
-    except Exception as e:
+    except (FileNotFoundError, IOError) as e:
         st.error(f"Ошибка загрузки или изменения размера изображения {image_path}: {e}")
         return None, None
 
@@ -48,6 +48,7 @@ def load_annotation_data(
             ".png",
             ".bmp",
             ".tiff",
+            ".webp",
         )  # Допустимые расширения изображений
 
         for line in lines:
@@ -114,8 +115,114 @@ def load_annotation_data(
             None,
         )
 
-    except Exception as e:
+    except (IOError, ValueError) as e:
         return {}, [], [], {}, set(), f"Ошибка при загрузке данных аннотации: {e}"
+
+
+def delete_current_image():
+    """
+    Удаляет текущее изображение из файловой системы, из кэша статусов,
+    из данных сессии Streamlit и из файла аннотаций.
+    """
+    if "current_image_idx" not in st.session_state or not st.session_state.image_files:
+        st.error("Нет изображений для удаления.")
+        return
+
+    current_idx = st.session_state.current_image_idx
+    current_full_image_path = st.session_state.image_files[current_idx]
+    current_image_name = os.path.basename(current_full_image_path)
+
+    # 1. Удаление изображения из файловой системы
+    try:
+        os.remove(current_full_image_path)
+        st.success(f"Изображение {current_image_name} удалено из файловой системы.")
+    except OSError as e:
+        st.error(f"Ошибка при удалении файла изображения {current_image_name}: {e}")
+        return
+
+    # 2. Удаление из кэша статусов
+    if current_image_name in st.session_state.cached_marked_images:
+        st.session_state.cached_marked_images.remove(current_image_name)
+        status_cache_file_path = os.path.join(
+            st.session_state.working_dir, "status_cache.txt"
+        )
+        with open(status_cache_file_path, "w", encoding="utf-8") as f:
+            for img_name in st.session_state.cached_marked_images:
+                f.write(f"{img_name}\n")
+        st.info(f"Изображение {current_image_name} удалено из кэша статусов.")
+
+    # 3. Удаление из данных сессии Streamlit
+    st.session_state.image_files.pop(current_idx)
+    st.session_state.original_relative_paths_for_saving.pop(current_idx)
+    if current_image_name in st.session_state.annotations:
+        del st.session_state.annotations[current_image_name]
+    if current_image_name in st.session_state.status_icons:
+        del st.session_state.status_icons[current_image_name]
+
+    # 4. Обновление файла аннотаций
+    annotation_file_path = st.session_state.annotation_file_path
+    with open(annotation_file_path, "w", encoding="utf-8") as f:
+        for (
+            relative_path_for_saving
+        ) in st.session_state.original_relative_paths_for_saving:
+            # Восстанавливаем img_name_for_saving из относительного пути для получения аннотации
+            full_path_for_saving = os.path.normpath(
+                os.path.join(
+                    st.session_state.image_base_directory, relative_path_for_saving
+                )
+            )
+            img_name_for_saving = os.path.basename(full_path_for_saving)
+            annotation_text_to_save = st.session_state.annotations.get(
+                img_name_for_saving, ""
+            )
+            f.write(f"{relative_path_for_saving}\t{annotation_text_to_save}\n")
+    st.info(f"Файл аннотаций обновлен после удаления {current_image_name}.")
+
+    # Обновление индекса текущего изображения
+    if st.session_state.current_image_idx >= len(st.session_state.image_files):
+        st.session_state.current_image_idx = max(
+            0, len(st.session_state.image_files) - 1
+        )
+
+    load_annotation_data.clear()  # Очищаем кэш для принудительной перезагрузки данных
+    st.rerun()
+
+
+def rotate_current_image(direction: str):
+    """
+    Поворачивает текущее изображение на 90 градусов в указанном направлении (left/right)
+    и сохраняет его, обновляя сессию Streamlit.
+    """
+    if "current_image_idx" not in st.session_state or not st.session_state.image_files:
+        st.error("Нет изображений для поворота.")
+        return
+
+    current_idx = st.session_state.current_image_idx
+    current_full_image_path = st.session_state.image_files[current_idx]
+    current_image_name = os.path.basename(current_full_image_path)
+
+    try:
+        image = Image.open(current_full_image_path)
+        if direction == "right":
+            rotated_image = image.rotate(-90, expand=True)  # Поворот вправо
+        elif direction == "left":
+            rotated_image = image.rotate(90, expand=True)  # Поворот влево
+        else:
+            st.error("Неверное направление поворота. Используйте 'left' или 'right'.")
+            return
+
+        # Сохраняем повернутое изображение, перезаписывая оригинал
+        rotated_image.save(current_full_image_path)
+        st.success(
+            f"Изображение {current_image_name} повернуто {direction} и сохранено."
+        )
+
+        # Очищаем кэш для load_and_resize_image, чтобы новое изображение загрузилось
+        load_and_resize_image.clear()
+        st.rerun()
+
+    except (IOError, FileNotFoundError) as e:
+        st.error(f"Ошибка при повороте изображения {current_image_name}: {e}")
 
 
 def main():
@@ -455,7 +562,7 @@ def main():
                     )
                     if image:
                         st.image(image)
-                except Exception as e:
+                except (FileNotFoundError, IOError) as e:
                     st.error(
                         f"Ошибка при загрузке изображения {current_image_name}: {e}"
                     )
@@ -536,8 +643,22 @@ def main():
                             st.session_state.current_image_idx += 1
                         st.rerun()
 
+                # --- Кнопки действий вне формы ---
+                col_action1, col_action2 = st.columns([1, 3])
+                with col_action1:
+                    if st.button(
+                        "Удалить изображение",
+                        key=f"delete_button_{current_image_name}",
+                    ):
+                        delete_current_image()
+                        st.rerun()  # Перезапускаем приложение после удаления
+                with col_action2:
+                    pass
+
                 # Кнопки навигации должны быть вне формы
-                col_nav1, col_nav2 = st.columns([1, 1])
+                col_nav1, col_nav2, col_nav3, col_nav4 = st.columns(
+                    [1, 1, 1, 1]
+                )  # Добавляем колонки для кнопок поворота
 
                 with col_nav1:
                     if st.button(
@@ -559,6 +680,12 @@ def main():
                     ):
                         st.session_state.current_image_idx += 1
                         st.rerun()
+                with col_nav3:
+                    if st.button("Повернуть влево", key="rotate_left_button"):
+                        rotate_current_image("left")
+                with col_nav4:
+                    if st.button("Повернуть вправо", key="rotate_right_button"):
+                        rotate_current_image("right")
 
                 st.markdown(
                     "--- Отредактируйте текст при необходимости и нажмите 'Подтвердить' для сохранения и перехода к следующему изображению. ---"
