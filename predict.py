@@ -14,6 +14,8 @@ import random
 from datetime import datetime
 from ocr_library.document_processing import FileIterator
 from ocr_library.nn.pipelines.text_recognize_classify_pipeline import TextRecClsPipeline
+from ocr_library.nn.models import RotateImage
+from ocr_library.utils.image_proc import correct_skew, flip_image
 from ocr_library.document_processing.utils import (
     remove_control_characters,
     map_pdf_x_to_pix,
@@ -108,7 +110,9 @@ def save_image(img_crop, img_count, images_one_folder, image_folder, num_digits)
     return img_count, image_save_path
 
 
-def save_txt(image_folder, good_preds, bad_highscore_preds, bad_underscore_preds, threshold):
+def save_txt(
+    image_folder, good_preds, bad_highscore_preds, bad_underscore_preds, threshold
+):
     curr_time = str(datetime.now().strftime("%Y-%m-%d %H-%M-%S"))
     with open(
         f"{image_folder}/good_result_{int(threshold * 100)}_{curr_time}.txt",
@@ -144,6 +148,10 @@ ocr = TextRecClsPipeline(
     infer_option="openvino",
     rec_model_path=r"C:\Users\pirat\OneDrive\Documents\Github\ml\models\ocr_rec\1\model.onnx",
     character_dict_path=r"C:\Users\pirat\OneDrive\Documents\Github\ml\models\ocr_rec_postproc\1\ru_dict_ext100124.txt",
+)
+rotate_orient_model = RotateImage(
+    path_to_model=r"C:\Users\pirat\OneDrive\Documents\Github\ml\models\rotate_image\1\model.onnx",
+    infer_option="openvino",
 )
 foundation_predictor = FoundationPredictor()
 recognition_predictor = RecognitionPredictor(foundation_predictor)
@@ -200,7 +208,11 @@ for file_idx, file_path in enumerate(matched_files):
                 pdf_preds.append(f"{image_save_path}\t{text_conf[0]}\n")
 
         else:
-            image = page
+            img = page
+            flat_preds = rotate_orient_model(img)
+            image = flip_image(img, flat_preds)[0]
+            image, skew_angle = correct_skew(image)
+            image = Image.fromarray(image)
             surya_bboxes = [
                 box.polygon for box in detection_predictor([image])[0].bboxes
             ]
@@ -237,7 +249,9 @@ for file_idx, file_path in enumerate(matched_files):
                                 f"{image_save_path}\t{paddle_text}\n"
                             )
                         elif surya_score >= filter_score:
-                            bad_highscore_preds.append(f"{image_save_path}\t{surya_text}\n")
+                            bad_highscore_preds.append(
+                                f"{image_save_path}\t{surya_text}\n"
+                            )
                         else:
                             bad_underscore_preds.append(
                                 f"{image_save_path}\t{paddle_text}\n"
