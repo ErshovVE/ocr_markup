@@ -387,6 +387,14 @@ def main():
             # Здесь мы не возвращаемся из main(), чтобы остальная часть приложения (загрузка файла) работала.
             # Вместо этого, мы просто не рендерим col1 и col2.
         else:  # Только если есть изображения, создаем колонки и рендерим их содержимое
+            # Дополнительная защита: убеждаемся, что current_image_idx находится в допустимых пределах
+            if st.session_state.current_image_idx < 0:
+                st.session_state.current_image_idx = 0
+            if st.session_state.current_image_idx >= len(st.session_state.image_files):
+                st.session_state.current_image_idx = (
+                    len(st.session_state.image_files) - 1
+                )
+
             # Если текущая страница или индекс изображения выходят за пределы нового отфильтрованного списка
             if st.session_state.current_page >= total_pages:
                 st.session_state.current_page = (
@@ -397,23 +405,31 @@ def main():
             # и что оно находится на текущей странице.
             # Сначала найдем текущий original_index_in_full_list в display_image_files.
             try:
-                current_global_idx_in_filtered = display_image_files.index(
-                    st.session_state.image_files[st.session_state.current_image_idx]
-                )
-                # Если текущий global_idx_in_filtered не на текущей странице, перейдем на страницу этого изображения
-                expected_page_for_current_image = (
-                    current_global_idx_in_filtered // st.session_state.page_size
-                )
-                if st.session_state.current_page != expected_page_for_current_image:
-                    st.session_state.current_page = expected_page_for_current_image
-            except (
-                ValueError
-            ):  # текущее изображение не найдено в отфильтрованном списке
-                st.session_state.current_image_idx = st.session_state.image_files.index(
-                    display_image_files[0]
-                )  # Переходим к первому изображению в отфильтрованном списке
+                current_image_file = st.session_state.image_files[
+                    st.session_state.current_image_idx
+                ]
+                if current_image_file in display_image_files:
+                    current_global_idx_in_filtered = display_image_files.index(
+                        current_image_file
+                    )
+                    # Если текущий global_idx_in_filtered не на текущей странице, перейдем на страницу этого изображения
+                    expected_page_for_current_image = (
+                        current_global_idx_in_filtered // st.session_state.page_size
+                    )
+                    if st.session_state.current_page != expected_page_for_current_image:
+                        st.session_state.current_page = expected_page_for_current_image
+                else:
+                    # текущее изображение не найдено в отфильтрованном списке
+                    st.session_state.current_image_idx = (
+                        st.session_state.image_files.index(display_image_files[0])
+                    )  # Переходим к первому изображению в отфильтрованном списке
+                    st.session_state.current_page = 0
+                    st.rerun()  # Нужно перезапустить, чтобы обновить UI
+            except IndexError:
+                # Защита от редких гонок состояний: откатываемся к первому изображению
+                st.session_state.current_image_idx = 0
                 st.session_state.current_page = 0
-                st.rerun()  # Нужно перезапустить, чтобы обновить UI
+                st.rerun()
 
             start_index = st.session_state.current_page * st.session_state.page_size
             end_index = min(start_index + st.session_state.page_size, total_images)
