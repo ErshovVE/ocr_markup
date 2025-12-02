@@ -585,8 +585,7 @@ def main():
                     st.error(
                         f"Ошибка при загрузке изображения {current_image_name}: {e}"
                     )
-                # print(f"Время отображения текущего изображения: {time.time() - st3}") # Удаляем таймер
-
+                
                 default_text = st.session_state.annotations.get(current_image_name, "")
 
                 with st.form(key=f"annotation_form_{current_image_name}"):
@@ -685,9 +684,7 @@ def main():
                                 handwritten_images_root, rel_path
                             )
                             os.makedirs(os.path.dirname(dest_full_path), exist_ok=True)
-                            print(base_dir)
-                            print(handwritten_images_root)
-                            print(dest_full_path)
+
                             # Копируем файл
                             shutil.copy2(current_full_image_path, dest_full_path)
 
