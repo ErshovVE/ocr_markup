@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import shutil
 from PIL import Image
 
 st.set_page_config(layout="wide")
@@ -283,6 +284,8 @@ def main():
             "Укажите рабочую директорию",
             value=st.session_state.image_base_directory,
         )
+        # Сохраняем введённое значение в session_state, чтобы использовать его в других функциях
+        st.session_state.image_base_directory = image_base_directory
 
         if not image_base_directory:
             st.warning("Пожалуйста, укажите рабочую директорию.")
@@ -599,12 +602,13 @@ def main():
                         ).replace("\r", " ")
                     )
 
-                    col_form1, col_form2 = st.columns([1, 2])
+                    col_form1, col_form2 = st.columns([1, 1])
                     with col_form1:
                         submit_button = st.form_submit_button("Подтвердить")
                     with col_form2:
-                        pass
+                        handwritten_button = st.form_submit_button("Рукописный текст")
 
+                    # Обработка основного подтверждения разметки
                     if submit_button:
                         st.session_state.annotations[current_image_name] = (
                             st.session_state.current_text_annotation
@@ -658,6 +662,69 @@ def main():
                         ):
                             st.session_state.current_image_idx += 1
                         st.rerun()
+
+                    # Обработка сценария "Рукописный текст"
+                    if handwritten_button:
+                        try:
+                            # Относительный путь исходного изображения из файла разметки
+                            rel_path = (
+                                st.session_state.original_relative_paths_for_saving[
+                                    st.session_state.current_image_idx
+                                ]
+                            )
+
+                            base_dir = st.session_state.image_base_directory
+
+                            # Папка для рукописных изображений внутри рабочей директории
+                            handwritten_images_root = os.path.join(
+                                base_dir, "handwritten_images"
+                            )
+
+                            # Полный путь, куда копируем изображение, сохраняя относительную структуру
+                            dest_full_path = os.path.join(
+                                handwritten_images_root, rel_path
+                            )
+                            os.makedirs(os.path.dirname(dest_full_path), exist_ok=True)
+                            print(base_dir)
+                            print(handwritten_images_root)
+                            print(dest_full_path)
+                            # Копируем файл
+                            shutil.copy2(current_full_image_path, dest_full_path)
+
+                            # Относительный путь, который будем писать в handwritten.txt
+                            rel_handwritten_path = os.path.join(
+                                "handwritten_images", rel_path
+                            ).replace("\\", "/")
+
+                            handwritten_txt_path = os.path.join(
+                                base_dir, "handwritten.txt"
+                            )
+                            new_line = f"{rel_handwritten_path}\t{st.session_state.current_text_annotation}\n"
+
+                            # Проверяем, есть ли уже такая строка в handwritten.txt
+                            is_duplicate = False
+                            if os.path.exists(handwritten_txt_path):
+                                with open(
+                                    handwritten_txt_path, "r", encoding="utf-8"
+                                ) as hw_file:
+                                    for line in hw_file:
+                                        if line == new_line:
+                                            is_duplicate = True
+                                            break
+
+                            if is_duplicate:
+                                st.info("Эта запись уже присутствует в handwritten.txt")
+                            else:
+                                with open(
+                                    handwritten_txt_path, "a", encoding="utf-8"
+                                ) as hw_file:
+                                    hw_file.write(new_line)
+
+                                st.success(
+                                    "Изображение и разметка добавлены в handwritten.txt как рукописный текст."
+                                )
+                        except OSError as e:
+                            st.error(f"Не удалось сохранить как рукописный текст: {e}")
 
                 # --- Кнопки действий вне формы ---
                 col_action1, col_action2 = st.columns([1, 3])
