@@ -28,9 +28,34 @@ def load_and_resize_image(image_path, max_height=100, max_width=1000):
         return None, None
 
 
+def get_status_cache_path(image_base_directory: str, relative_paths: list) -> str:
+    """
+    Определяет путь к файлу кэша статусов на основе первой относительной директории.
+    Например, если путь myplace/images/0/image_00005.webp, то кэш будет в G:/Датасет/myplace/status_cache.txt
+    """
+    if not relative_paths:
+        # Если нет путей, используем базовую директорию
+        return os.path.join(image_base_directory, "status_cache.txt")
+
+    # Берем первый относительный путь и извлекаем первую директорию
+    first_relative_path = relative_paths[0]
+    # Разделяем путь на части
+    path_parts = first_relative_path.replace("\\", "/").split("/")
+    if path_parts and path_parts[0]:
+        first_dir = path_parts[0]
+        # Путь к кэшу: базовая_директория/первая_директория/status_cache.txt
+        cache_dir = os.path.join(image_base_directory, first_dir)
+        return os.path.join(cache_dir, "status_cache.txt")
+    else:
+        # Если не удалось определить первую директорию, используем базовую
+        return os.path.join(image_base_directory, "status_cache.txt")
+
+
 @st.cache_data
 def load_annotation_data(
-    file_contents: str, image_base_directory: str, working_dir_for_cache: str
+    file_contents: str,
+    image_base_directory: str,
+    working_dir_for_cache: str,  # working_dir_for_cache оставлен для совместимости, но не используется
 ):
     """Загружает данные разметки из содержимого файла, разрешает пути и инициализирует статусы."""
     annotations = {}
@@ -91,11 +116,22 @@ def load_annotation_data(
             data["relative_path"] for data in image_data_for_processing
         ]
 
-        # Загрузка кэша статусов
-        status_cache_file_path = os.path.join(working_dir_for_cache, "status_cache.txt")
+        # Загрузка кэша статусов из первой относительной директории
+        # ВАЖНО: Используем правильный путь к кэшу на основе первой относительной директории
+        status_cache_file_path = get_status_cache_path(
+            image_base_directory, original_relative_paths_for_saving
+        )
         if os.path.exists(status_cache_file_path):
-            with open(status_cache_file_path, "r", encoding="utf-8") as f:
-                cached_marked_images = set(f.read().splitlines())
+            try:
+                with open(status_cache_file_path, "r", encoding="utf-8") as f:
+                    cache_lines = f.read().splitlines()
+                    # Убираем пустые строки
+                    cached_marked_images = set(
+                        line.strip() for line in cache_lines if line.strip()
+                    )
+            except (IOError, OSError):
+                # Если не удалось прочитать кэш, продолжаем без него
+                cached_marked_images = set()
 
         # Инициализация status_icons
         for full_path in image_files:
@@ -144,9 +180,15 @@ def delete_current_image():
     # 2. Удаление из кэша статусов
     if current_image_name in st.session_state.cached_marked_images:
         st.session_state.cached_marked_images.remove(current_image_name)
-        status_cache_file_path = os.path.join(
-            st.session_state.working_dir, "status_cache.txt"
-        )
+        # Используем сохраненный путь к кэшу или вычисляем заново
+        if "status_cache_path" in st.session_state:
+            status_cache_file_path = st.session_state.status_cache_path
+        else:
+            status_cache_file_path = get_status_cache_path(
+                st.session_state.image_base_directory,
+                st.session_state.original_relative_paths_for_saving,
+            )
+        os.makedirs(os.path.dirname(status_cache_file_path), exist_ok=True)
         with open(status_cache_file_path, "w", encoding="utf-8") as f:
             for img_name in st.session_state.cached_marked_images:
                 f.write(f"{img_name}\n")
@@ -161,23 +203,41 @@ def delete_current_image():
         del st.session_state.status_icons[current_image_name]
 
     # 4. Обновление файла аннотаций
-    annotation_file_path = st.session_state.annotation_file_path
-    with open(annotation_file_path, "w", encoding="utf-8") as f:
-        for (
-            relative_path_for_saving
-        ) in st.session_state.original_relative_paths_for_saving:
-            # Восстанавливаем img_name_for_saving из относительного пути для получения аннотации
-            full_path_for_saving = os.path.normpath(
-                os.path.join(
-                    st.session_state.image_base_directory, relative_path_for_saving
+    # Определяем путь к исходному файлу в рабочей директории
+    if "original_annotation_file_name" in st.session_state:
+        # Сохраняем в исходный файл в рабочей директории
+        original_file_name = st.session_state.original_annotation_file_name
+        annotation_file_path = os.path.join(
+            st.session_state.image_base_directory, original_file_name
+        )
+    else:
+        # Fallback на временный файл, если имя не сохранено
+        annotation_file_path = st.session_state.annotation_file_path
+
+    try:
+        with open(annotation_file_path, "w", encoding="utf-8") as f:
+            for (
+                relative_path_for_saving
+            ) in st.session_state.original_relative_paths_for_saving:
+                # Восстанавливаем img_name_for_saving из относительного пути для получения аннотации
+                full_path_for_saving = os.path.normpath(
+                    os.path.join(
+                        st.session_state.image_base_directory, relative_path_for_saving
+                    )
                 )
-            )
-            img_name_for_saving = os.path.basename(full_path_for_saving)
-            annotation_text_to_save = st.session_state.annotations.get(
-                img_name_for_saving, ""
-            )
-            f.write(f"{relative_path_for_saving}\t{annotation_text_to_save}\n")
-    st.info(f"Файл аннотаций обновлен после удаления {current_image_name}.")
+                img_name_for_saving = os.path.basename(full_path_for_saving)
+                annotation_text_to_save = st.session_state.annotations.get(
+                    img_name_for_saving, ""
+                )
+                f.write(f"{relative_path_for_saving}\t{annotation_text_to_save}\n")
+
+        # Проверяем, что файл действительно был обновлен
+        if not os.path.exists(annotation_file_path):
+            st.error(f"Ошибка: файл {annotation_file_path} не был обновлен.")
+        else:
+            st.info(f"Файл аннотаций обновлен после удаления {current_image_name}.")
+    except (IOError, OSError) as e:
+        st.error(f"Ошибка при обновлении файла аннотаций: {e}")
 
     # Обновление индекса текущего изображения
     if st.session_state.current_image_idx >= len(st.session_state.image_files):
@@ -254,28 +314,17 @@ def main():
     # Заменяем st.text_input на st.file_uploader
     uploaded_annotation_file = st.file_uploader("Загрузите файл разметки", type=["txt"])
 
+    # Обработка загрузки нового файла
     if uploaded_annotation_file is not None:
-        # Временное сохранение загруженного файла для дальнейшей обработки
+        # Сохраняем имя исходного файла
+        original_file_name = uploaded_annotation_file.name
+        st.session_state.original_annotation_file_name = original_file_name
+
+        # Читаем содержимое файла (не сохраняем во временную папку)
         file_contents = uploaded_annotation_file.read().decode("utf-8")
-        temp_file_path = os.path.join(
-            "temp_data", uploaded_annotation_file.name
-        )  # Создаем временную папку
-        os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
-        with open(temp_file_path, "w", encoding="utf-8") as f:
-            f.write(file_contents)
 
-        st.session_state.annotation_file_path = temp_file_path
-
-        if not os.path.exists(st.session_state.annotation_file_path):
-            st.error("Загруженный файл не найден.")
-            return
-        if not os.path.isfile(st.session_state.annotation_file_path):
-            st.error("Загруженный файл не является файлом.")
-            return
-
-        # Рабочая директория для кэша статусов (там, где временно сохранен файл разметки)
-        working_dir_for_cache = os.path.dirname(st.session_state.annotation_file_path)
-        st.session_state.working_dir = working_dir_for_cache
+        # Сохраняем содержимое файла в session_state для дальнейшей обработки
+        st.session_state.annotation_file_contents = file_contents
 
         # Добавляем поле для ввода базовой директории изображений
         if "image_base_directory" not in st.session_state:
@@ -293,7 +342,9 @@ def main():
         if not os.path.isdir(image_base_directory):
             st.error("Указанная рабочая директория не существует.")
             return
+
         # Вызываем кэшированную функцию для загрузки всех данных
+        # working_dir_for_cache больше не используется, путь к кэшу определяется автоматически
         (
             annotations,
             image_files,
@@ -304,8 +355,18 @@ def main():
         ) = load_annotation_data(
             file_contents,
             image_base_directory,
-            working_dir_for_cache,
+            image_base_directory,  # Передаем базовую директорию, путь к кэшу определяется внутри функции
         )
+
+        # Сохраняем путь к кэшу статусов для дальнейшего использования
+        if original_relative_paths_for_saving:
+            st.session_state.status_cache_path = get_status_cache_path(
+                image_base_directory, original_relative_paths_for_saving
+            )
+        else:
+            st.session_state.status_cache_path = os.path.join(
+                image_base_directory, "status_cache.txt"
+            )
 
         if error_message:
             st.error(error_message)
@@ -349,6 +410,137 @@ def main():
             st.session_state.current_page = (
                 st.session_state.current_image_idx // st.session_state.page_size
             )
+
+    # Обработка случая, когда файл уже загружен (работа с существующими данными)
+    elif (
+        "annotation_file_path" in st.session_state
+        and st.session_state.annotation_file_path
+        and os.path.exists(st.session_state.annotation_file_path)
+    ):
+        # Файл уже загружен, продолжаем работу с существующими данными
+        # Обновляем рабочую директорию, если она не установлена
+        if "working_dir" not in st.session_state:
+            st.session_state.working_dir = os.path.dirname(
+                st.session_state.annotation_file_path
+            )
+
+        # Поле для ввода базовой директории изображений (если еще не установлено)
+        if "image_base_directory" not in st.session_state:
+            st.session_state.image_base_directory = ""
+        image_base_directory = st.text_input(
+            "Укажите рабочую директорию",
+            value=st.session_state.image_base_directory,
+        )
+        # Сохраняем введённое значение в session_state
+        st.session_state.image_base_directory = image_base_directory
+
+        if not image_base_directory:
+            st.warning("Пожалуйста, укажите рабочую директорию.")
+            return
+        if not os.path.isdir(image_base_directory):
+            st.error("Указанная рабочая директория не существует.")
+            return
+
+        # Перезагружаем данные из файла, если они изменились (например, после удаления)
+        # Читаем текущее содержимое файла
+        try:
+            with open(
+                st.session_state.annotation_file_path, "r", encoding="utf-8"
+            ) as f:
+                current_file_contents = f.read()
+
+            # Загружаем данные из текущего файла
+            (
+                annotations,
+                image_files,
+                original_relative_paths_for_saving,
+                status_icons,
+                cached_marked_images,
+                error_message,
+            ) = load_annotation_data(
+                current_file_contents,
+                image_base_directory,
+                image_base_directory,  # working_dir_for_cache больше не используется
+            )
+
+            # Сохраняем путь к кэшу статусов для дальнейшего использования
+            if original_relative_paths_for_saving:
+                st.session_state.status_cache_path = get_status_cache_path(
+                    image_base_directory, original_relative_paths_for_saving
+                )
+            else:
+                st.session_state.status_cache_path = os.path.join(
+                    image_base_directory, "status_cache.txt"
+                )
+
+            if error_message:
+                st.error(error_message)
+                return
+
+            # Обновляем session_state только если списки изменились (например, после удаления)
+            # ИЛИ если annotations изменились (например, после сохранения)
+            lists_changed = (
+                "image_files" not in st.session_state
+                or len(st.session_state.image_files) != len(image_files)
+                or st.session_state.image_files != image_files
+            )
+
+            # Проверяем, изменились ли annotations (сравниваем ключи и значения)
+            annotations_changed = False
+            if "annotations" in st.session_state:
+                # Проверяем, есть ли различия в ключах или значениях
+                if set(st.session_state.annotations.keys()) != set(annotations.keys()):
+                    annotations_changed = True
+                else:
+                    # Проверяем значения для текущего изображения
+                    for key in annotations:
+                        if st.session_state.annotations.get(key, "") != annotations.get(
+                            key, ""
+                        ):
+                            annotations_changed = True
+                            break
+            else:
+                annotations_changed = True
+
+            if lists_changed or annotations_changed:
+                # Обновляем все данные из файла
+                st.session_state.annotations = annotations
+                st.session_state.image_files = image_files
+                st.session_state.original_relative_paths_for_saving = (
+                    original_relative_paths_for_saving
+                )
+
+                # Обновляем status_icons из загруженных данных (включая статусы из кэша)
+                # ВАЖНО: status_icons уже содержит правильные статусы из кэша, загруженного из правильного места
+                st.session_state.status_icons = status_icons.copy()
+                st.session_state.cached_marked_images = cached_marked_images
+
+                # Корректируем current_image_idx, если он вышел за границы
+                if "current_image_idx" in st.session_state:
+                    if st.session_state.current_image_idx >= len(image_files):
+                        st.session_state.current_image_idx = max(
+                            0, len(image_files) - 1
+                        )
+                else:
+                    st.session_state.current_image_idx = 0
+
+            # Инициализация пагинации
+            if "page_size" not in st.session_state:
+                st.session_state.page_size = 100
+            if "current_page" not in st.session_state:
+                st.session_state.current_page = 0
+
+            # Убедимся, что current_image_idx соответствует current_page
+            if st.session_state.current_image_idx not in range(
+                st.session_state.current_page * st.session_state.page_size,
+                (st.session_state.current_page + 1) * st.session_state.page_size,
+            ):
+                st.session_state.current_page = (
+                    st.session_state.current_image_idx // st.session_state.page_size
+                )
+        except (IOError, FileNotFoundError) as e:
+            st.error(f"Ошибка при чтении файла аннотаций: {e}")
+            return
 
     else:
         st.warning("Пожалуйста, загрузите файл разметки.")
@@ -571,7 +763,22 @@ def main():
                 current_full_image_path = st.session_state.image_files[
                     st.session_state.current_image_idx
                 ]
-                current_image_name = os.path.basename(current_full_image_path)
+                # Получаем относительный путь для текущего изображения
+                current_relative_path = (
+                    st.session_state.original_relative_paths_for_saving[
+                        st.session_state.current_image_idx
+                    ]
+                )
+
+                # Вычисляем имя файла единообразно - из относительного пути (как при сохранении)
+                current_image_name = os.path.basename(
+                    os.path.normpath(
+                        os.path.join(
+                            st.session_state.image_base_directory,
+                            current_relative_path,
+                        )
+                    )
+                )
                 st.subheader(f"Текущее изображение: {current_image_name}")
 
                 # st3 = time.time() # Удаляем таймер
@@ -585,21 +792,26 @@ def main():
                     st.error(
                         f"Ошибка при загрузке изображения {current_image_name}: {e}"
                     )
-                
+
                 default_text = st.session_state.annotations.get(current_image_name, "")
 
+                # Используем session_state для хранения текста аннотации
+                annotation_key = f"annotation_text_{current_image_name}"
+                if annotation_key not in st.session_state:
+                    st.session_state[annotation_key] = default_text
+
                 with st.form(key=f"annotation_form_{current_image_name}"):
-                    st.session_state.current_text_annotation = st.text_input(
+                    text_input_value = st.text_input(
                         "Текст с изображения",
-                        value=default_text,
+                        value=st.session_state.get(annotation_key, default_text),
                         key=f"text_input_form_{current_image_name}",
                     )
                     # Обработка переносов строки - замена на пробелы
-                    st.session_state.current_text_annotation = (
-                        st.session_state.current_text_annotation.replace(
-                            "\n", " "
-                        ).replace("\r", " ")
+                    text_input_value = text_input_value.replace("\n", " ").replace(
+                        "\r", " "
                     )
+                    # Сохраняем значение в session_state сразу
+                    st.session_state[annotation_key] = text_input_value
 
                     col_form1, col_form2 = st.columns([1, 1])
                     with col_form1:
@@ -609,30 +821,89 @@ def main():
 
                     # Обработка основного подтверждения разметки
                     if submit_button:
+                        # Используем значение из session_state, которое гарантированно актуально
+                        annotation_text = st.session_state[annotation_key].strip()
+
+                        # ВАЖНО: Сначала обновляем session_state
                         st.session_state.annotations[current_image_name] = (
-                            st.session_state.current_text_annotation
+                            annotation_text
                         )
                         st.session_state.status_icons[current_image_name] = (
                             "✅"  # Отмечаем как размеченное зеленой галочкой
                         )
 
                         # Обновляем кэш отмеченных изображений (храним basename)
+                        # Убеждаемся, что имя файла совпадает с тем, что используется при загрузке
                         st.session_state.cached_marked_images.add(current_image_name)
-                        status_cache_file_path = os.path.join(
-                            st.session_state.working_dir, "status_cache.txt"
+                        # Используем сохраненный путь к кэшу или вычисляем заново
+                        if "status_cache_path" in st.session_state:
+                            status_cache_file_path = st.session_state.status_cache_path
+                        else:
+                            status_cache_file_path = get_status_cache_path(
+                                st.session_state.image_base_directory,
+                                st.session_state.original_relative_paths_for_saving,
+                            )
+                        # Создаем директорию для кэша, если её нет
+                        os.makedirs(
+                            os.path.dirname(status_cache_file_path), exist_ok=True
                         )
-                        with open(status_cache_file_path, "w", encoding="utf-8") as f:
-                            for img_name in st.session_state.cached_marked_images:
-                                f.write(f"{img_name}\n")
-                        st.info(
-                            f"Статус для {current_image_name} сохранен в {status_cache_file_path}"
-                        )
+                        try:
+                            # Записываем кэш, удаляя пустые строки
+                            with open(
+                                status_cache_file_path, "w", encoding="utf-8"
+                            ) as f:
+                                for img_name in sorted(
+                                    st.session_state.cached_marked_images
+                                ):
+                                    if img_name.strip():  # Пропускаем пустые строки
+                                        f.write(f"{img_name.strip()}\n")
+
+                            # Проверяем, что файл был записан и содержит текущее изображение
+                            if os.path.exists(status_cache_file_path):
+                                with open(
+                                    status_cache_file_path, "r", encoding="utf-8"
+                                ) as f:
+                                    cache_content = f.read()
+                                if current_image_name in cache_content:
+                                    # Очищаем кэш load_annotation_data, чтобы при следующей загрузке
+                                    # статусы загрузились из правильного места
+                                    load_annotation_data.clear()
+                                    st.info(
+                                        f"Статус для {current_image_name} сохранен в {status_cache_file_path}"
+                                    )
+                                else:
+                                    st.warning(
+                                        f"Предупреждение: {current_image_name} не найден в кэше после записи."
+                                    )
+                            else:
+                                st.error(
+                                    f"Ошибка: файл кэша {status_cache_file_path} не был создан."
+                                )
+                        except (IOError, OSError) as e:
+                            st.error(f"Ошибка при сохранении кэша статусов: {e}")
 
                         # Сохраняем данные разметки в файл аннотаций после каждого подтверждения (храним относительный путь)
-                        annotation_file_path = st.session_state.annotation_file_path
-                        with open(annotation_file_path, "w", encoding="utf-8") as f:
-                            for relative_path_for_saving in st.session_state.original_relative_paths_for_saving:  # Итерируемся по оригинальному списку относительных путей
-                                img_name_for_saving = os.path.basename(
+                        # Определяем путь к исходному файлу в рабочей директории
+                        if "original_annotation_file_name" in st.session_state:
+                            # Сохраняем в исходный файл в рабочей директории
+                            original_file_name = (
+                                st.session_state.original_annotation_file_name
+                            )
+                            annotation_file_path = os.path.join(
+                                st.session_state.image_base_directory,
+                                original_file_name,
+                            )
+                        else:
+                            # Fallback на временный файл, если имя не сохранено
+                            annotation_file_path = st.session_state.annotation_file_path
+
+                        try:
+                            # Создаем список строк для записи
+                            lines_to_write = []
+                            for (
+                                relative_path_for_saving
+                            ) in st.session_state.original_relative_paths_for_saving:
+                                img_name_for_file = os.path.basename(
                                     os.path.normpath(
                                         os.path.join(
                                             st.session_state.image_base_directory,
@@ -642,18 +913,56 @@ def main():
                                 )
                                 annotation_text_to_save = (
                                     st.session_state.annotations.get(
-                                        img_name_for_saving, ""
+                                        img_name_for_file, ""
                                     )
                                 )
-                                f.write(
+                                lines_to_write.append(
                                     f"{relative_path_for_saving}\t{annotation_text_to_save}\n"
                                 )
 
-                        load_annotation_data.clear()  # Очищаем кэш, чтобы данные перезагрузились
+                            # Записываем все строки в файл
+                            with open(annotation_file_path, "w", encoding="utf-8") as f:
+                                f.writelines(lines_to_write)
 
-                        st.success(
-                            f"Данные для {current_image_name} сохранены в {annotation_file_path}"
-                        )
+                            # Проверяем, что файл действительно был записан и содержит данные
+                            if not os.path.exists(annotation_file_path):
+                                st.error(
+                                    f"Ошибка: файл {annotation_file_path} не был создан."
+                                )
+                            else:
+                                # Проверяем содержимое файла
+                                with open(
+                                    annotation_file_path, "r", encoding="utf-8"
+                                ) as f:
+                                    file_content = f.read()
+                                # Проверяем, что данные действительно записались
+                                # Ищем строку с текущим относительным путем и проверяем аннотацию
+                                found_correct_data = False
+                                for line in file_content.splitlines():
+                                    if line.startswith(current_relative_path + "\t"):
+                                        saved_annotation = (
+                                            line.split("\t", 1)[1]
+                                            if "\t" in line
+                                            else ""
+                                        )
+                                        if saved_annotation == annotation_text:
+                                            found_correct_data = True
+                                            break
+
+                                if found_correct_data:
+                                    # Очищаем кэш load_annotation_data, чтобы при следующей загрузке
+                                    # статусы загрузились из правильного места
+                                    load_annotation_data.clear()
+                                    st.success(
+                                        f"Данные для {current_image_name} сохранены в {annotation_file_path}"
+                                    )
+                                else:
+                                    st.warning(
+                                        f"Предупреждение: данные для {current_image_name} могут не быть сохранены в файл. "
+                                        f"Ожидалось: '{annotation_text}', найдено в файле: {file_content[:200]}"
+                                    )
+                        except (IOError, OSError) as e:
+                            st.error(f"Ошибка при сохранении файла аннотаций: {e}")
 
                         if (
                             st.session_state.current_image_idx
@@ -666,11 +975,7 @@ def main():
                     if handwritten_button:
                         try:
                             # Относительный путь исходного изображения из файла разметки
-                            rel_path = (
-                                st.session_state.original_relative_paths_for_saving[
-                                    st.session_state.current_image_idx
-                                ]
-                            )
+                            rel_path = current_relative_path
 
                             base_dir = st.session_state.image_base_directory
 
@@ -696,7 +1001,12 @@ def main():
                             handwritten_txt_path = os.path.join(
                                 base_dir, "handwritten.txt"
                             )
-                            new_line = f"{rel_handwritten_path}\t{st.session_state.current_text_annotation}\n"
+                            # Используем значение из session_state
+                            annotation_text_for_handwritten = st.session_state.get(
+                                f"annotation_text_{current_image_name}",
+                                text_input_value,
+                            )
+                            new_line = f"{rel_handwritten_path}\t{annotation_text_for_handwritten}\n"
 
                             # Проверяем, есть ли уже такая строка в handwritten.txt
                             is_duplicate = False
