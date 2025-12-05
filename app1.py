@@ -5,8 +5,147 @@ from PIL import Image
 from typing import Dict, List, Set, Tuple, Optional
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime
+import json
 
 st.set_page_config(layout="wide", page_title="Инструмент разметки OCR")
+
+# Горячие клавиши через HTML/JavaScript
+HOTKEYS_SCRIPT = """
+<script>
+document.addEventListener('keydown', function(e) {
+    // Ctrl+S - сохранить
+    if (e.ctrlKey && e.key === 's') {
+        e.preventDefault();
+        const saveBtn = document.querySelector('[data-testid="baseButton-secondary"]');
+        if (saveBtn && saveBtn.textContent.includes('Сохранить')) {
+            saveBtn.click();
+        }
+    }
+    // Ctrl+Enter - подтвердить
+    else if (e.ctrlKey && e.key === 'Enter') {
+        e.preventDefault();
+        const confirmBtn = Array.from(document.querySelectorAll('button')).find(
+            btn => btn.textContent.includes('Подтвердить')
+        );
+        if (confirmBtn) confirmBtn.click();
+    }
+    // Стрелка влево - предыдущее изображение (только если не в поле ввода)
+    else if (e.key === 'ArrowLeft' && e.target.tagName !== 'INPUT') {
+        e.preventDefault();
+        const prevBtn = Array.from(document.querySelectorAll('button')).find(
+            btn => btn.textContent.includes('Пред.')
+        );
+        if (prevBtn && !prevBtn.disabled) prevBtn.click();
+    }
+    // Стрелка вправо - следующее изображение
+    else if (e.key === 'ArrowRight' && e.target.tagName !== 'INPUT') {
+        e.preventDefault();
+        const nextBtn = Array.from(document.querySelectorAll('button')).find(
+            btn => btn.textContent.includes('След.')
+        );
+        if (nextBtn && !nextBtn.disabled) nextBtn.click();
+    }
+});
+</script>
+"""
+
+
+class BackupManager:
+    """Управление резервными копиями с ротацией"""
+    
+    def __init__(self, base_dir: Path, max_backups: int = 5):
+        self.base_dir = base_dir
+        self.backup_dir = base_dir / ".backups"
+        self.max_backups = max_backups
+        self.backup_dir.mkdir(exist_ok=True)
+        
+        # Метаданные бэкапов
+        self.metadata_file = self.backup_dir / "metadata.json"
+        self.metadata = self._load_metadata()
+    
+    def _load_metadata(self) -> Dict:
+        """Загружает метаданные бэкапов"""
+        if self.metadata_file.exists():
+            try:
+                return json.loads(self.metadata_file.read_text(encoding='utf-8'))
+            except:
+                return {"backups": []}
+        return {"backups": []}
+    
+    def _save_metadata(self):
+        """Сохраняет метаданные"""
+        self.metadata_file.write_text(
+            json.dumps(self.metadata, indent=2, ensure_ascii=False),
+            encoding='utf-8'
+        )
+    
+    def create_backup(self, source_file: Path, operation: str = "manual") -> Optional[Path]:
+        """Создает резервную копию"""
+        if not source_file.exists():
+            return None
+        
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_name = f"{source_file.stem}_{timestamp}.backup{source_file.suffix}"
+            backup_path = self.backup_dir / backup_name
+            
+            shutil.copy2(source_file, backup_path)
+            
+            # Добавляем в метаданные
+            self.metadata["backups"].append({
+                "file": backup_name,
+                "timestamp": timestamp,
+                "operation": operation,
+                "original": str(source_file.name)
+            })
+            
+            # Ротация старых бэкапов
+            self._rotate_backups()
+            self._save_metadata()
+            
+            return backup_path
+        except Exception as e:
+            st.error(f"Ошибка создания бэкапа: {e}")
+            return None
+    
+    def _rotate_backups(self):
+        """Удаляет старые бэкапы, оставляя только последние max_backups"""
+        backups = self.metadata["backups"]
+        
+        if len(backups) > self.max_backups:
+            # Удаляем самые старые
+            to_remove = backups[:-self.max_backups]
+            
+            for backup_info in to_remove:
+                backup_file = self.backup_dir / backup_info["file"]
+                if backup_file.exists():
+                    backup_file.unlink()
+            
+            # Оставляем только последние
+            self.metadata["backups"] = backups[-self.max_backups:]
+    
+    def restore_backup(self, backup_name: str, target_file: Path) -> bool:
+        """Восстанавливает из бэкапа"""
+        backup_path = self.backup_dir / backup_name
+        
+        if not backup_path.exists():
+            return False
+        
+        try:
+            shutil.copy2(backup_path, target_file)
+            return True
+        except Exception as e:
+            st.error(f"Ошибка восстановления: {e}")
+            return False
+    
+    def get_backups_list(self) -> List[Dict]:
+        """Возвращает список доступных бэкапов"""
+        return sorted(
+            self.metadata.get("backups", []),
+            key=lambda x: x["timestamp"],
+            reverse=True
+        )
 
 
 @dataclass
@@ -27,6 +166,7 @@ class AnnotationManager:
         self.records: Dict[str, ImageRecord] = {}
         self.modified_records: Set[str] = set()
         self.cache_path: Optional[Path] = None
+        self.backup_manager = BackupManager(self.base_dir)
         
     def load_from_file(self, file_contents: str) -> Tuple[bool, str]:
         """Загружает данные из файла"""
@@ -93,12 +233,16 @@ class AnnotationManager:
             self.records[img_name].is_marked = True
             self.modified_records.add(img_name)
     
-    def delete_record(self, img_name: str) -> bool:
+    def delete_record(self, img_name: str, create_backup: bool = True) -> bool:
         """Удаляет запись об изображении"""
         if img_name not in self.records:
             return False
         
         record = self.records[img_name]
+        
+        # Создаем бэкап перед удалением
+        if create_backup:
+            self.backup_manager.create_backup(self.annotation_file, operation="delete")
         
         # Удаляем файл
         try:
@@ -113,12 +257,21 @@ class AnnotationManager:
         
         return True
     
-    def save_changes(self) -> Tuple[bool, str]:
+    def save_changes(self, create_backup: bool = True) -> Tuple[bool, str]:
         """Сохраняет все изменения"""
         if not self.modified_records and not self.records:
             return True, ""
         
         try:
+            # Создаем бэкап перед сохранением
+            if create_backup and self.annotation_file.exists():
+                backup_path = self.backup_manager.create_backup(
+                    self.annotation_file, 
+                    operation="save"
+                )
+                if backup_path:
+                    st.info(f"📦 Бэкап создан: {backup_path.name}")
+            
             # Сохраняем файл аннотаций
             lines = []
             for record in self.records.values():
@@ -220,7 +373,9 @@ def init_session_state():
         'current_page': 0,
         'page_size': 100,
         'filter_option': 'all',
-        'unsaved_changes': 0
+        'unsaved_changes': 0,
+        'confirm_delete': None,  # Имя изображения для подтверждения удаления
+        'show_backups': False
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -314,19 +469,41 @@ def render_image_editor(manager: AnnotationManager):
     if image:
         st.image(image)
     
+    # Модальное окно подтверждения удаления
+    if st.session_state.confirm_delete == current_name:
+        st.error(f"⚠️ Вы уверены, что хотите удалить **{current_name}**?")
+        st.warning("Это действие необратимо! Файл будет удален с диска.")
+        
+        col_confirm1, col_confirm2, col_confirm3 = st.columns([1, 1, 2])
+        with col_confirm1:
+            if st.button("✓ Да, удалить", type="primary"):
+                if manager.delete_record(current_name, create_backup=True):
+                    manager.save_changes(create_backup=False)  # Уже создали бэкап в delete_record
+                    st.success("✓ Изображение удалено, бэкап создан")
+                    st.session_state.confirm_delete = None
+                    st.rerun()
+        with col_confirm2:
+            if st.button("✗ Отмена"):
+                st.session_state.confirm_delete = None
+                st.rerun()
+        
+        st.divider()
+        return  # Показываем только диалог подтверждения
+    
     # Форма редактирования
     with st.form(key=f"form_{current_name}"):
         text_value = st.text_input(
             "Текст с изображения",
             value=record.annotation,
-            key=f"input_{current_name}"
+            key=f"input_{current_name}",
+            help="Ctrl+Enter для быстрого подтверждения"
         )
         
         col1, col2 = st.columns(2)
         with col1:
-            submit = st.form_submit_button("✓ Подтвердить")
+            submit = st.form_submit_button("✓ Подтвердить", use_container_width=True)
         with col2:
-            handwritten = st.form_submit_button("✍ Рукописный текст")
+            handwritten = st.form_submit_button("✍ Рукописный текст", use_container_width=True)
         
         if submit:
             clean_text = text_value.replace('\n', ' ').replace('\r', ' ').strip()
@@ -338,7 +515,9 @@ def render_image_editor(manager: AnnotationManager):
                 success, msg = manager.save_changes()
                 if success:
                     st.session_state.unsaved_changes = 0
-                    st.success("Автосохранение выполнено")
+                    st.success("💾 Автосохранение выполнено")
+            else:
+                st.success(f"✓ Сохранено в памяти (несохранено: {st.session_state.unsaved_changes})")
             
             # Переход к следующему
             if st.session_state.current_idx < len(img_names) - 1:
@@ -348,49 +527,51 @@ def render_image_editor(manager: AnnotationManager):
         if handwritten:
             clean_text = text_value.replace('\n', ' ').replace('\r', ' ').strip()
             if save_as_handwritten(manager, current_name, clean_text):
-                st.success("Сохранено как рукописный текст")
+                st.success("✓ Сохранено как рукописный текст")
     
     # Действия вне формы
+    st.markdown("### Действия")
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        if st.button("🗑 Удалить"):
-            if manager.delete_record(current_name):
-                manager.save_changes()
-                st.success("Изображение удалено")
-                st.rerun()
+        if st.button("🗑 Удалить", use_container_width=True, type="secondary"):
+            st.session_state.confirm_delete = current_name
+            st.rerun()
     
     with col2:
-        if st.button("↶ Влево"):
+        if st.button("↶ Влево", use_container_width=True):
             if rotate_image(record.absolute_path, "left"):
-                st.success("Повернуто влево")
+                st.success("↶ Повернуто влево")
                 st.rerun()
     
     with col3:
-        if st.button("↷ Вправо"):
+        if st.button("↷ Вправо", use_container_width=True):
             if rotate_image(record.absolute_path, "right"):
-                st.success("Повернуто вправо")
+                st.success("↷ Повернуто вправо")
                 st.rerun()
     
     with col4:
-        if st.button("← Пред.") and st.session_state.current_idx > 0:
+        if st.button("← Пред.", use_container_width=True, disabled=st.session_state.current_idx == 0):
             st.session_state.current_idx -= 1
             st.rerun()
     
     with col5:
-        if st.button("След. →") and st.session_state.current_idx < len(img_names) - 1:
+        if st.button("След. →", use_container_width=True, disabled=st.session_state.current_idx >= len(img_names) - 1):
             st.session_state.current_idx += 1
             st.rerun()
     
     # Индикатор несохраненных изменений
     if st.session_state.unsaved_changes > 0:
         st.warning(f"⚠️ Несохраненных изменений: {st.session_state.unsaved_changes}")
-        if st.button("💾 Сохранить сейчас"):
+        if st.button("💾 Сохранить сейчас", type="primary"):
             success, msg = manager.save_changes()
             if success:
                 st.session_state.unsaved_changes = 0
                 st.success(msg)
                 st.rerun()
+    
+    # Горячие клавиши - подсказка
+    st.caption("💡 **Горячие клавиши:** Ctrl+S (сохранить) | Ctrl+Enter (подтвердить) | ← → (навигация)")
 
 
 def main():
@@ -403,6 +584,9 @@ def main():
         img {border: 2px solid #4CAF50; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);}
         </style>
     """, unsafe_allow_html=True)
+    
+    # Горячие клавиши
+    st.components.v1.html(HOTKEYS_SCRIPT, height=0)
     
     st.title("🖼️ Инструмент разметки OCR")
     
@@ -438,7 +622,7 @@ def main():
                 st.error(error)
                 return
             
-            st.success(f"Загружено {len(st.session_state.manager.records)} изображений")
+            st.success(f"✓ Загружено {len(st.session_state.manager.records)} изображений")
         
         manager = st.session_state.manager
         
@@ -462,7 +646,7 @@ def main():
         with col2:
             render_image_editor(manager)
         
-        # Статистика
+        # Сайдбар - Статистика и управление бэкапами
         st.sidebar.header("📊 Статистика")
         total = len(manager.records)
         marked = sum(1 for r in manager.records.values() if r.is_marked)
@@ -470,14 +654,71 @@ def main():
         st.sidebar.metric("Размечено", f"{marked} ({marked*100//total if total else 0}%)")
         st.sidebar.metric("Осталось", total - marked)
         
+        st.sidebar.divider()
+        
         # Финальное сохранение
-        if st.sidebar.button("💾 Сохранить все изменения"):
+        if st.sidebar.button("💾 Сохранить все изменения", use_container_width=True, type="primary"):
             success, msg = manager.save_changes()
             if success:
                 st.session_state.unsaved_changes = 0
                 st.sidebar.success("✓ Все изменения сохранены")
             else:
                 st.sidebar.error(msg)
+        
+        # Управление бэкапами
+        st.sidebar.divider()
+        st.sidebar.header("🗂️ Резервные копии")
+        
+        backups = manager.backup_manager.get_backups_list()
+        
+        if backups:
+            st.sidebar.caption(f"Всего бэкапов: {len(backups)} (макс. {manager.backup_manager.max_backups})")
+            
+            if st.sidebar.button("📋 Показать бэкапы", use_container_width=True):
+                st.session_state.show_backups = not st.session_state.show_backups
+            
+            if st.session_state.show_backups:
+                st.sidebar.markdown("---")
+                for backup in backups[:5]:  # Показываем последние 5
+                    timestamp_formatted = datetime.strptime(
+                        backup["timestamp"], "%Y%m%d_%H%M%S"
+                    ).strftime("%d.%m.%Y %H:%M:%S")
+                    
+                    operation_emoji = {
+                        "save": "💾",
+                        "delete": "🗑️",
+                        "manual": "✋"
+                    }.get(backup["operation"], "📝")
+                    
+                    st.sidebar.caption(f"{operation_emoji} {timestamp_formatted}")
+                    st.sidebar.caption(f"Файл: `{backup['file'][:30]}...`")
+                    
+                    if st.sidebar.button(
+                        "↩️ Восстановить",
+                        key=f"restore_{backup['file']}",
+                        use_container_width=True
+                    ):
+                        if manager.backup_manager.restore_backup(
+                            backup["file"],
+                            manager.annotation_file
+                        ):
+                            st.sidebar.success("✓ Восстановлено из бэкапа!")
+                            st.sidebar.info("Перезагрузите приложение для применения изменений")
+                        else:
+                            st.sidebar.error("Ошибка восстановления")
+                    
+                    st.sidebar.markdown("---")
+        else:
+            st.sidebar.caption("Бэкапов пока нет")
+        
+        # Информация о горячих клавишах
+        st.sidebar.divider()
+        st.sidebar.header("⌨️ Горячие клавиши")
+        st.sidebar.markdown("""
+        - **Ctrl + S** — Сохранить все
+        - **Ctrl + Enter** — Подтвердить текст
+        - **← →** — Навигация по изображениям
+        """)
 
 
 if __name__ == "__main__":
