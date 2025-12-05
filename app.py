@@ -574,9 +574,31 @@ def main():
             total_images + st.session_state.page_size - 1
         ) // st.session_state.page_size
 
-        # Если изображений нет после фильтрации, выводим предупреждение и завершаем отображение этой части UI
+        # Если изображений нет после фильтрации, выводим предупреждение и даем возможность изменить фильтр
         if total_images == 0:
             st.warning("Нет изображений для разметки по текущему фильтру.")
+
+            # Добавляем возможность изменить фильтр
+            def on_filter_change_empty():
+                st.session_state.current_page = 0
+                new_filter_option = st.session_state.filter_radio_empty
+                st.session_state.filter_option = new_filter_option
+                st.rerun()
+
+            st.radio(
+                "Показать:",
+                ("Все изображения", "Только неразмеченные", "Только размеченные"),
+                key="filter_radio_empty",
+                index=(
+                    (
+                        "Все изображения",
+                        "Только неразмеченные",
+                        "Только размеченные",
+                    ).index(st.session_state.filter_option)
+                ),
+                on_change=on_filter_change_empty,
+            )
+
             # Сбрасываем current_image_idx, если он неактуален
             st.session_state.current_image_idx = 0
             # Здесь мы не возвращаемся из main(), чтобы остальная часть приложения (загрузка файла) работала.
