@@ -2,7 +2,7 @@
 
 ## Tech Stack
 - Python + Streamlit (single-page data-labeling app), Pillow for image handling
-- No package manifest beyond `requirements.txt` (streamlit==1.36.0, Pillow==11.1.0); no lockfile, no venv config committed
+- No package manifest beyond `requirements.txt` (streamlit==1.36.0, Pillow==10.4.0); no lockfile, no venv config committed
 - Packaged to a standalone .exe via PyInstaller (`wrapper.py` + `pyinst_command.txt`)
 - `predict.py` / `predict.ipynb` are separate offline OCR-labeling-data generation scripts with a heavier, unlisted dependency set (`opencv-python`, `surya-ocr`, `tqdm`, and a private `ocr_library` package) and hardcoded local model paths — they are not part of the Streamlit app and not installable from `requirements.txt` alone
 
@@ -14,14 +14,16 @@
 - No type annotations modernization (`Dict`/`List`/`Optional` from `typing`, not `dict`/`list`/`X | None`) and no `frozen=True` on dataclasses — preserved intentionally, see `docs/architecture.md`
 
 ## Testing
-- No test suite, test framework, or CI config present in this repo
-- Manual verification only: run the app and click through the labeling flow
+- `pytest` covers `src/` (models, backup, annotations) and `backend/consensus.py`; no CI config present in this repo
+- `backend/detector.py`/`backend/recognizers.py` are not unit-tested (lazily import heavy ML deps requiring real models/system Tesseract) — see `docs/testing.md`
+- Manual verification still required for the Streamlit UI flow itself: run the app and click through the labeling flow
 
 ## Build & Run
 - Dev: `streamlit run app1.py --server.enableXsrfProtection=false`
-- Install deps: `pip install -r requirements.txt`
+- Install deps: `pip install -r requirements.txt`; install dev deps (pytest, ruff): `pip install -r requirements-dev.txt`
+- Docker: `docker compose up --build` runs the Streamlit frontend and the `backend/` consensus spike as separate containers — see `docs/docker.md`
 - Build standalone exe: see `pyinst_command.txt` (PyInstaller, bundles `app.py` via `wrapper.py`) — **stale**: `wrapper.py`/`pyinst_command.txt` still reference the now-archived `app.py` path, not `app1.py`/`legacy/app.py`; needs fixing before the next `.exe` build (see `docs/architecture.md`)
-- No lint/format tooling configured (no ruff/black/flake8 config files found)
+- Lint/format: `ruff check .` / `ruff format .` (config in `pyproject.toml`) — see `docs/testing.md`
 
 ## Project Structure
 - `app1.py` — sole Streamlit entry point: page config, CSS, session-state init, file upload/working-dir wiring, calls into `src/`

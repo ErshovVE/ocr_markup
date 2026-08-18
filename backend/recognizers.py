@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Tuple
 
 
 class _Engines:
@@ -67,7 +67,9 @@ def recognize_tesseract(crop) -> Tuple[str, float]:
 
         data = pytesseract.image_to_data(crop, lang="rus", output_type=Output.DICT)
         words = [
-            (w, c) for w, c in zip(data["text"], data["conf"]) if int(c) != -1 and w.strip()
+            (w, c)
+            for w, c in zip(data["text"], data["conf"], strict=False)
+            if int(c) != -1 and w.strip()
         ]
         if not words:
             return "", 0.0

@@ -25,7 +25,7 @@ class BackupManager:
         if self.metadata_file.exists():
             try:
                 return json.loads(self.metadata_file.read_text(encoding="utf-8"))
-            except:
+            except (OSError, json.JSONDecodeError):
                 return {"backups": []}
         return {"backups": []}
 

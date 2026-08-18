@@ -18,3 +18,14 @@
 3. Запустите приложение: `streamlit run app1.py --server.enableXsrfProtection=false`.
 
 Старая версия `app.py` архивирована в `legacy/app.py` — оставлена только для справки, не запускается как часть основного flow.
+
+## Docker
+
+Приложение и backend-спайк консенсуса можно запустить в контейнерах:
+`docker compose up --build`. Подробности — в [docs/docker.md](docs/docker.md).
+
+## Разработка
+
+- Тесты: `pytest` (см. [docs/testing.md](docs/testing.md))
+- Линтер: `ruff check .` / `ruff format .`
+

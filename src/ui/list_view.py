@@ -47,7 +47,7 @@ def render_image_list(manager: AnnotationManager, filtered_images: List[str]):
 
     # Список
     with st.container(height=350):
-        for i, img_name in enumerate(filtered_images[start:end]):
+        for _i, img_name in enumerate(filtered_images[start:end]):
             record = manager.records[img_name]
             status = "✅" if record.is_marked else "❓"
             display = f"{status} {img_name}"
