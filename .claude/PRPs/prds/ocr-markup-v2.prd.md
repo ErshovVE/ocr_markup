@@ -128,11 +128,11 @@ Consensus spike: maintainer points the backend at a folder of documents → back
 | 2 | Extract model/backup/annotation layer | Pull `ImageRecord`, `BackupManager`, `AnnotationManager` out of `app1.py` into `src/` modules, preserving the rotate/cache-clear coupling | in-progress | with 1 | - | `.claude/PRPs/plans/refactor-app1-into-src-package.plan.md` |
 | 3 | Extract UI layer + thin entry point | Move `render_image_list`, `render_image_editor`, hotkey injection, and the currently-inline sidebar block into `src/ui/`; reduce `app1.py` to session-state init + wiring | in-progress | - | 2 | `.claude/PRPs/plans/refactor-app1-into-src-package.plan.md` |
 | 4 | Documentation pass | Document `src/` module layout, data model (rec.txt/status_cache.txt/handwritten.txt), and the two known fragile couplings | in-progress | - | 3 | `.claude/PRPs/plans/refactor-app1-into-src-package.plan.md` |
-| 5 | Manual regression click-through | Walk every existing flow end-to-end against the refactored app1.py | pending | - | 3 | - |
-| 6 | Portable consensus backend skeleton | Strip `ocr_library`/hardcoded-path dependencies from `predict.py`'s detect+recognize flow; stand up as an independent service; PaddleOCR detector + PaddleOCR/Surya recognizers running | pending | - | - | - |
-| 7 | Add Tesseract + real 2-of-3 vote + configurable threshold/override | Extend the backend from 2-engine exact-match to true 3-engine voting with configurable score threshold and manual preferred-model override | pending | - | 6 | - |
-| 8 | Wire spike into labeling app | Minimal import path (manual trigger + import of good/needs-review buckets) from the backend into the existing `rec.txt` workflow | pending | - | 5, 7 | - |
-| 9 | Subjective evaluation | Run the spike against a real document batch; maintainer judges time-saved; decide go/no-go on further consensus investment | pending | - | 8 | - |
+| 5 | Manual regression click-through | Walk every existing flow end-to-end against the refactored app1.py | pending — checklist written, click-through not yet run | - | 3 | `.claude/PRPs/checklists/app1-regression-checklist.md` |
+| 6 | Portable consensus backend skeleton | Strip `ocr_library`/hardcoded-path dependencies from `predict.py`'s detect+recognize flow; stand up as an independent service; PaddleOCR detector + PaddleOCR/Surya recognizers running | code-complete — not yet installed/run against a real batch | - | - | `.claude/PRPs/plans/ocr-consensus-spike-phases-5-9.plan.md` |
+| 7 | Add Tesseract + real 2-of-3 vote + configurable threshold/override | Extend the backend from 2-engine exact-match to true 3-engine voting with configurable score threshold and manual preferred-model override | code-complete — `vote()` unit-verified by hand (all 4 branches), Tesseract call not yet run against real `tesseract-ocr`/`rus` install | - | 6 | `.claude/PRPs/plans/ocr-consensus-spike-phases-5-9.plan.md` |
+| 8 | Wire spike into labeling app | Minimal import path (manual trigger + import of good/needs-review buckets) from the backend into the existing `rec.txt` workflow | code-complete — UI wired into sidebar, not yet exercised against a running backend | - | 5, 7 | `.claude/PRPs/plans/ocr-consensus-spike-phases-5-9.plan.md` |
+| 9 | Subjective evaluation | Run the spike against a real document batch; maintainer judges time-saved; decide go/no-go on further consensus investment | pending — blocked on Phases 5/6/7/8 live validation | - | 8 | - |
 
 ### Phase Details
 
@@ -196,6 +196,7 @@ Phases 1 and 2 touch disjoint parts of the codebase (archiving `app.py` vs. extr
 | OCR consensus deployment | Separate backend service | Bundle into main Streamlit app/exe | Avoids bloating the packaged labeling tool with heavy ML dependencies |
 | VLM engine scope | Deferred past this version | Include VLM engines now alongside classical ones | User explicitly split classical (firm) vs. VLM (later) |
 | Success measurement for consensus spike | Subjective time-saved judgment | Formal precision/recall benchmark | User confirmed subjective is sufficient for this version; no ground-truth eval infra exists yet |
+| Phases 5-9 implementation scope (2026-08-18) | Write all code (backend/, src/ui/consensus_view.py) and the Phase 5 checklist doc; skip installing heavy ML deps (paddleocr, surya-ocr, pytesseract) and skip live click-through/batch runs in this session | Also install deps and run everything live in-session | Maintainer chose to review/install/run manually rather than have an agent pip-install multi-GB ML packages and drive the Streamlit UI; `backend/consensus.py::vote()` was still unit-verified by hand since it requires no heavy deps |
 
 ---
 
