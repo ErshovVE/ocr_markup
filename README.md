@@ -15,4 +15,6 @@
 
 1. Клонируйте репозиторий.
 2. Установите зависимости: `pip install -r requirements.txt`.
-3. Запустите приложение: `streamlit run app.py --server.enableXsrfProtection=false`.
+3. Запустите приложение: `streamlit run app1.py --server.enableXsrfProtection=false`.
+
+Старая версия `app.py` архивирована в `legacy/app.py` — оставлена только для справки, не запускается как часть основного flow.
