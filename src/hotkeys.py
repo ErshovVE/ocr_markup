@@ -1,4 +1,5 @@
-# JS below matches Streamlit nav buttons by literal '←'/'→' text in editor_view.py — keep button labels unchanged or hotkeys silently break.
+# JS matches nav buttons by literal '←'/'→' text in editor_view.py —
+# keep button labels unchanged or hotkeys silently break.
 from streamlit.components.v1 import html
 
 

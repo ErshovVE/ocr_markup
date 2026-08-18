@@ -12,17 +12,17 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
 
     return os.path.join(base_path, relative_path)
-   
+
 
 if __name__ == "__main__":
     app_path = resource_path("app.py")
     sys.argv = [
-        "streamlit", 
-        "run", 
+        "streamlit",
+        "run",
         app_path,
         "--global.developmentMode=false",
         "--server.headless=true"
     ]
-    
+
     # Запуск Streamlit
     sys.exit(stcli.main())

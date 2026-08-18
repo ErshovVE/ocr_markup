@@ -20,7 +20,8 @@ def load_and_resize_image(
         return None
 
 
-# NOTE: load_and_resize_image.clear() only works because both functions live in this module — see docs/architecture.md
+# NOTE: load_and_resize_image.clear() only works because both functions live
+# in this module — see docs/architecture.md
 def rotate_image(image_path: str, direction: str) -> bool:
     """Поворачивает изображение на 90 градусов"""
     try:
