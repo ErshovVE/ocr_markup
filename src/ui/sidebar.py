@@ -3,6 +3,7 @@ from datetime import datetime
 import streamlit as st
 
 from src.annotations import AnnotationManager
+from src.ui.consensus_view import render_consensus_section
 
 
 def render_sidebar(manager: AnnotationManager):
@@ -78,3 +79,5 @@ def render_sidebar(manager: AnnotationManager):
                         st.sidebar.error("Ошибка")
     else:
         st.sidebar.caption("Нет бэкапов")
+
+    render_consensus_section(manager)
