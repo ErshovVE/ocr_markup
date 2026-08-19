@@ -1,11 +1,12 @@
 import os
+import shutil
 
 import requests
 import streamlit as st
 
 from src.annotations import AnnotationManager
 
-BACKEND_URL = "http://127.0.0.1:8756"
+BACKEND_URL = os.environ.get("CONSENSUS_BACKEND_URL", "http://127.0.0.1:8756")
 
 
 def render_consensus_section(manager: AnnotationManager):
@@ -70,11 +71,22 @@ def _import_results(manager: AnnotationManager, output_dir: str):
                 continue
             with open(path, "r", encoding="utf-8") as f:
                 contents = f.read()
-            imported_names = {
-                os.path.basename(line.split("\t", 1)[0].strip())
-                for line in contents.splitlines()
-                if line.strip()
-            }
+
+            # good.txt/needs_review.txt пути относительны output_dir консенсуса,
+            # а не текущей рабочей директории — копируем кропы в base_dir по
+            # тому же относительному пути, иначе load_from_file молча их пропустит
+            imported_names = set()
+            for line in contents.splitlines():
+                if not line.strip():
+                    continue
+                relative_path = line.split("\t", 1)[0].strip()
+                src = os.path.join(output_dir, relative_path)
+                dst = manager.base_dir / relative_path
+                if os.path.exists(src) and not dst.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                imported_names.add(os.path.basename(relative_path))
+
             success, error = manager.load_from_file(contents)
             if not success:
                 st.sidebar.error(f"{fname}: {error}")
