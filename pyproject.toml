@@ -1,6 +1,7 @@
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+src = ["frontend", "backend"]
 exclude = ["legacy", ".venv*", "predict.py", "predict.ipynb"]
 
 [tool.ruff.lint]
@@ -9,4 +10,4 @@ exclude = ["legacy", ".venv*", "predict.py", "predict.ipynb"]
 select = ["E", "F", "W", "I", "B"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["frontend/tests", "backend/tests"]

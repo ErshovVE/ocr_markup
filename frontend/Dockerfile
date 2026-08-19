@@ -1,13 +1,14 @@
 # Frontend: Streamlit-инструмент разметки OCR (app.py + src/)
-FROM python:3.11-slim
+# Собирать из корня репозитория: docker build -f frontend/Dockerfile .
+FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY frontend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
-COPY src/ src/
+COPY frontend/app.py .
+COPY frontend/src/ src/
 
 EXPOSE 8501
 
