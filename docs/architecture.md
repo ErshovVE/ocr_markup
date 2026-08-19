@@ -4,7 +4,7 @@
 
 | Файл | Ответственность |
 |---|---|
-| `app1.py` | Точка входа: `st.set_page_config`, CSS, `init_session_state`, загрузка файла/рабочей директории, инициализация `AnnotationManager`, вызов `render_image_list`/`render_image_editor`/`render_sidebar` |
+| `app.py` | Точка входа: `st.set_page_config`, CSS, `init_session_state`, загрузка файла/рабочей директории, инициализация `AnnotationManager`, вызов `render_image_list`/`render_image_editor`/`render_sidebar` |
 | `src/models.py` | `ImageRecord` — структура данных для одной записи изображения |
 | `src/backup.py` | `BackupManager` — создание, ротация и восстановление резервных копий файла аннотаций |
 | `src/annotations.py` | `AnnotationManager` — загрузка/сохранение аннотаций, кэш статусов, удаление записей; `save_as_handwritten` — экспорт изображения как рукописного |
@@ -13,7 +13,6 @@
 | `src/ui/list_view.py` | `render_image_list` — список изображений с фильтром и пагинацией |
 | `src/ui/editor_view.py` | `render_image_editor` — редактор текущего изображения: текст, удаление, поворот, навигация |
 | `src/ui/sidebar.py` | `render_sidebar` — статистика, сохранение всех изменений, управление бэкапами |
-| `legacy/app.py` | Архивная, неиспользуемая версия приложения (см. раздел «Внимание») |
 
 ## Формат данных
 
@@ -48,6 +47,3 @@ JSON с ключом `"backups"` — список объектов `{file, times
 ### Связка горячих клавиш с текстом кнопок (`src/hotkeys.py` ↔ `src/ui/editor_view.py`)
 JS-обработчик в `register_hotkeys` (`src/hotkeys.py`) находит кнопки навигации исключительно по буквальному совпадению символов `←`/`→` в `btn.textContent` — без использования `id`/`key`. Кнопки навигации создаются в `render_image_editor` (`src/ui/editor_view.py`, строки с `st.button("←", ...)` и `st.button("→", ...)`). Если текст этих кнопок изменится даже косметически (пробел, эмодзи, перевод на другой язык), горячие клавиши молча перестанут работать — без каких-либо ошибок.
 
-## Внимание
-
-`wrapper.py` и `pyinst_command.txt` всё ещё ссылаются на архивный путь `app.py` (теперь `legacy/app.py`) для сборки PyInstaller-исполняемого файла. Это не исправлено в рамках данного рефакторинга (Фазы 1-4) и должно быть обновлено перед следующей сборкой `.exe`.
