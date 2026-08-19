@@ -1,0 +1,37 @@
+Codemap generation report — 2026-08-19
+
+STATUS: First-time generation. No prior docs/CODEMAPS/ existed, so no diff to compute.
+
+Files created:
+- docs/CODEMAPS/architecture.md
+- docs/CODEMAPS/backend.md
+- docs/CODEMAPS/frontend.md
+- docs/CODEMAPS/data.md
+- docs/CODEMAPS/dependencies.md
+
+Source material scanned:
+- backend/main.py, jobs.py, pipeline.py, detector.py, recognizers.py, consensus.py, models_status.py, config.py
+- frontend/app.py, wrapper.py, src/models.py, src/backup.py, src/annotations.py, src/image_ops.py,
+  src/hotkeys.py, src/ui/list_view.py, src/ui/editor_view.py, src/ui/sidebar.py, src/ui/manual_mode.py,
+  src/ui/generation_view.py
+- Existing docs/architecture.md, docs/docker.md, docs/testing.md (used as source of truth, not duplicated)
+
+Architecture notes surfaced during scan:
+- No database anywhere — confirmed flat-file-only persistence (rec.txt, status_cache.txt, handwritten.txt,
+  .backups/metadata.json on the frontend side; good.txt/needs_review.txt/crops/*.webp on the backend side).
+- Two services share no code; the only coupling point is generation_view.py::_build_manager_from_output
+  reading backend's good.txt/needs_review.txt format directly.
+- Backend job state (jobs.py) and model-readiness state (models_status.py) are in-process memory only,
+  reset on restart — a one-job-at-a-time design, not a bug.
+- detector.py/recognizers.py remain untested (heavy ML deps, real models/system Tesseract required) —
+  matches docs/testing.md.
+- predict.py/predict.ipynb at repo root are confirmed NOT part of either service (separate, heavier,
+  unlisted dependency set with hardcoded local paths).
+
+Staleness: docs/architecture.md, docs/docker.md, docs/testing.md all last modified today (2026-08-19) —
+no staleness warning.
+
+New dependencies detected: none beyond what's already listed in docs/architecture.md's tech stack section.
+
+Next scan: re-run after next major feature addition or refactor (per skill guidance), or when
+docs/architecture.md's module map changes.
