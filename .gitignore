@@ -207,8 +207,8 @@ marimo/_lsp/
 __marimo__/
 
 
-*.txt
 *.ipynb
 !predict.ipynb
 *core/config.py
 images/
+data/*
