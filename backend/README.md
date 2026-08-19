@@ -5,6 +5,15 @@ PaddleOCR/SuryaOCR/TesseractOCR распознаватели). Не включё
 `frontend/requirements.txt` и не участвует в сборке `.exe` — тяжёлые ML-зависимости
 изолированы намеренно.
 
+Детектор строк использует PaddleOCR PP-OCRv6 (детекция не зависит от языка).
+Распознавание по умолчанию (`lang="ru"`) использует кириллическую модель
+`cyrillic_PP-OCRv5_mobile_rec` — PP-OCRv6 её не заменяет, так как её 50 языков
+это китайский/японский/английский и 46 языков на латинице, кириллица не
+поддерживается. Для документов на латинице можно передать `lang="latin"` в
+`/run` — тогда вместо кириллической модели используется PaddleOCR PP-OCRv6
+(`latin_model_size`: `tiny` | `small` (по умолчанию) | `medium`), а Tesseract
+переключается на `lang="eng"`.
+
 ## Установка
 
 Рекомендуется отдельное виртуальное окружение:
@@ -39,7 +48,7 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null}` → `{"job_id": str}`
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium"}` → `{"job_id": str}`
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error", "error": str | null}`
 - `GET /result/{job_id}` → `{"output_dir": str, "good_count": int, "needs_review_count": int}`
 

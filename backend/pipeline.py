@@ -9,7 +9,13 @@ from PIL import Image
 from backend.config import IMAGE_EXTENSIONS
 from backend.consensus import vote
 from backend.detector import Detector
-from backend.recognizers import recognize_paddle, recognize_surya, recognize_tesseract
+from backend.recognizers import (
+    DEFAULT_LATIN_MODEL_SIZE,
+    recognize_paddle,
+    recognize_paddle_latin,
+    recognize_surya,
+    recognize_tesseract,
+)
 
 MIN_CROP_PIX = 10
 
@@ -19,6 +25,8 @@ def run(
     output_dir: str,
     threshold: float,
     preferred_model: Optional[str] = None,
+    lang: str = "ru",
+    latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов: детекция -> распознавание x3 -> голосование.
 
@@ -40,6 +48,7 @@ def run(
 
     good_lines = []
     needs_review_lines = []
+    tesseract_lang = "rus" if lang == "ru" else "eng"
 
     for file_path in matched_files:
         try:
@@ -59,10 +68,15 @@ def run(
                 if img_crop.shape[0] <= MIN_CROP_PIX or img_crop.shape[1] <= MIN_CROP_PIX:
                     continue
 
+                paddle_result = (
+                    recognize_paddle(img_crop)
+                    if lang == "ru"
+                    else recognize_paddle_latin(img_crop, latin_model_size)
+                )
                 results = {
-                    "paddle": recognize_paddle(img_crop),
+                    "paddle": paddle_result,
                     "surya": recognize_surya(image, box),
-                    "tesseract": recognize_tesseract(img_crop),
+                    "tesseract": recognize_tesseract(img_crop, tesseract_lang),
                 }
                 bucket, text, _engine = vote(results, threshold, preferred_model)
 

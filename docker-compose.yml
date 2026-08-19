@@ -9,6 +9,7 @@ services:
       - ./data:/data
     environment:
       - PYTHONUNBUFFERED=1
+      - CONSENSUS_BACKEND_URL=http://backend:8756
 
   backend:
     build:
@@ -18,8 +19,8 @@ services:
       - "8756:8756"
     volumes:
       - ./data:/data
-      - paddleocr-models:/root/.paddleocr
-      - surya-models:/root/.cache/huggingface
+      - paddleocr-models:/root/.paddlex
+      - surya-models:/root/.cache/datalab
     environment:
       - PYTHONUNBUFFERED=1
 

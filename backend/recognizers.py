@@ -1,20 +1,38 @@
 from typing import Tuple
 
+LATIN_MODEL_SIZES = ("tiny", "small", "medium")
+DEFAULT_LATIN_MODEL_SIZE = "small"
+
 
 class _Engines:
     """Ленивый холдер тяжёлых моделей распознавания (Paddle, Surya)"""
 
-    _paddle_ocr = None
+    _paddle_cyrillic = None
+    _paddle_latin = {}
     _foundation_predictor = None
     _recognition_predictor = None
 
     @classmethod
-    def paddle(cls):
-        if cls._paddle_ocr is None:
-            from paddleocr import PaddleOCR
+    def paddle_cyrillic(cls):
+        if cls._paddle_cyrillic is None:
+            from paddleocr import TextRecognition
 
-            cls._paddle_ocr = PaddleOCR(use_angle_cls=False, lang="ru", det=False)
-        return cls._paddle_ocr
+            cls._paddle_cyrillic = TextRecognition(
+                model_name="cyrillic_PP-OCRv5_mobile_rec", enable_mkldnn=False
+            )
+        return cls._paddle_cyrillic
+
+    @classmethod
+    def paddle_latin(cls, model_size: str = DEFAULT_LATIN_MODEL_SIZE):
+        if model_size not in LATIN_MODEL_SIZES:
+            raise ValueError(f"Неизвестный размер модели PP-OCRv6: {model_size}")
+        if model_size not in cls._paddle_latin:
+            from paddleocr import TextRecognition
+
+            cls._paddle_latin[model_size] = TextRecognition(
+                model_name=f"PP-OCRv6_{model_size}_rec", enable_mkldnn=False
+            )
+        return cls._paddle_latin[model_size]
 
     @classmethod
     def surya_recognition(cls):
@@ -30,16 +48,28 @@ class _Engines:
 
 
 def recognize_paddle(crop) -> Tuple[str, float]:
-    """Распознавание текста через PaddleOCR (только распознавание, без детекции)"""
+    """Распознавание русского/кириллического текста через PaddleOCR (cyrillic_PP-OCRv5_mobile_rec)"""
     try:
-        import numpy as np
-
-        predictions = _Engines.paddle()(np.array([crop]))
-        text = predictions[0][0][0]
-        score = predictions[0][0][1]
-        return text, score
+        result = list(_Engines.paddle_cyrillic().predict(crop, batch_size=1))
+        if not result:
+            return "", 0.0
+        return result[0]["rec_text"], result[0]["rec_score"]
     except Exception as e:
         print(f"Ошибка PaddleOCR: {e}")
+        return "", 0.0
+
+
+def recognize_paddle_latin(
+    crop, model_size: str = DEFAULT_LATIN_MODEL_SIZE
+) -> Tuple[str, float]:
+    """Распознавание латиницы через PaddleOCR PP-OCRv6 (опциональный движок для не-русского текста)"""
+    try:
+        result = list(_Engines.paddle_latin(model_size).predict(crop, batch_size=1))
+        if not result:
+            return "", 0.0
+        return result[0]["rec_text"], result[0]["rec_score"]
+    except Exception as e:
+        print(f"Ошибка PaddleOCR PP-OCRv6: {e}")
         return "", 0.0
 
 
@@ -59,13 +89,13 @@ def recognize_surya(image, box) -> Tuple[str, float]:
         return "", 0.0
 
 
-def recognize_tesseract(crop) -> Tuple[str, float]:
+def recognize_tesseract(crop, lang: str = "rus") -> Tuple[str, float]:
     """Распознавание текста через Tesseract"""
     try:
         import pytesseract
         from pytesseract import Output
 
-        data = pytesseract.image_to_data(crop, lang="rus", output_type=Output.DICT)
+        data = pytesseract.image_to_data(crop, lang=lang, output_type=Output.DICT)
         words = [
             (w, c)
             for w, c in zip(data["text"], data["conf"], strict=False)

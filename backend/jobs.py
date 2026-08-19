@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Dict, Literal, Optional
 
 from backend import pipeline
+from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE
 
 JobStatus = Literal["running", "done", "error"]
 
@@ -31,10 +32,12 @@ def _run_job(
     output_dir: str,
     threshold: float,
     preferred_model: Optional[str],
+    lang: str,
+    latin_model_size: str,
 ):
     try:
         good_count, needs_review_count = pipeline.run(
-            input_dir, output_dir, threshold, preferred_model
+            input_dir, output_dir, threshold, preferred_model, lang, latin_model_size
         )
         _jobs[job_id] = JobState(
             status="done",
@@ -53,13 +56,23 @@ def start_job(
     output_dir: str,
     threshold: float,
     preferred_model: Optional[str] = None,
+    lang: str = "ru",
+    latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE,
 ) -> str:
     """Запускает pipeline.run в фоновом потоке и сразу возвращает job_id"""
     job_id = str(uuid.uuid4())
     _jobs[job_id] = JobState(status="running")
     thread = threading.Thread(
         target=_run_job,
-        args=(job_id, input_dir, output_dir, threshold, preferred_model),
+        args=(
+            job_id,
+            input_dir,
+            output_dir,
+            threshold,
+            preferred_model,
+            lang,
+            latin_model_size,
+        ),
         daemon=True,
     )
     thread.start()
