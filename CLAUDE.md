@@ -38,7 +38,8 @@
   - `src/ui/list_view.py` — `render_image_list`: filtered, paginated image list
   - `src/ui/editor_view.py` — `render_image_editor`: text edit, delete, rotate, nav
   - `src/ui/sidebar.py` — `render_sidebar`: stats, save-all, backup list/restore
-  - `src/ui/consensus_view.py` — `render_consensus_section`: import OCR-consensus results produced by `backend/`
+  - `src/ui/manual_mode.py` — `render_manual_mode`: the manual-labeling flow (upload, working dir, list/editor/sidebar)
+  - `src/ui/generation_view.py` — `render_generation_mode`: model status (Paddle/Surya/Tesseract), OCR-consensus run/status, handoff into manual mode
   - `wrapper.py` — PyInstaller entry point that launches Streamlit headless from a bundled exe
   - `pyinst_command.txt` — the exact PyInstaller build command
   - `tests/` — pytest suite for `src/`

@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from backend import models_status
 from backend.config import DEFAULT_SCORE_THRESHOLD
 from backend.jobs import get_job, start_job
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE, LATIN_MODEL_SIZES
@@ -24,6 +25,10 @@ class RunRequest(BaseModel):
     # текста; tesseract при этом тоже переключается на lang="eng".
     lang: str = "ru"
     latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE
+
+
+class PrepareRequest(BaseModel):
+    model: str
 
 
 @app.post("/run")
@@ -64,3 +69,20 @@ def result(job_id: str):
     if job is None or job.status != "done":
         raise HTTPException(404, "Result not ready")
     return job.result
+
+
+@app.get("/models/status")
+def models_status_endpoint():
+    return {
+        name: {"status": state.status, "detail": state.detail}
+        for name, state in models_status.get_status().items()
+    }
+
+
+@app.post("/models/prepare")
+def models_prepare(req: PrepareRequest):
+    try:
+        models_status.prepare(req.model)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"status": "started"}

@@ -3,7 +3,6 @@ from datetime import datetime
 import streamlit as st
 
 from src.annotations import AnnotationManager
-from src.ui.consensus_view import render_consensus_section
 
 
 def render_sidebar(manager: AnnotationManager):
@@ -12,9 +11,7 @@ def render_sidebar(manager: AnnotationManager):
     total = len(manager.records)
     marked = sum(1 for r in manager.records.values() if r.is_marked)
     st.sidebar.metric("Всего", total)
-    st.sidebar.metric(
-        "Размечено", f"{marked} ({marked * 100 // total if total else 0}%)"
-    )
+    st.sidebar.metric("Размечено", f"{marked} ({marked * 100 // total if total else 0}%)")
     st.sidebar.metric("Осталось", total - marked)
 
     st.sidebar.divider()
@@ -40,9 +37,7 @@ def render_sidebar(manager: AnnotationManager):
     backups = manager.backup_manager.get_backups_list()
 
     if backups:
-        st.sidebar.caption(
-            f"{len(backups)} из {manager.backup_manager.max_backups}"
-        )
+        st.sidebar.caption(f"{len(backups)} из {manager.backup_manager.max_backups}")
 
         if st.sidebar.button(
             "📋",
@@ -79,5 +74,3 @@ def render_sidebar(manager: AnnotationManager):
                         st.sidebar.error("Ошибка")
     else:
         st.sidebar.caption("Нет бэкапов")
-
-    render_consensus_section(manager)

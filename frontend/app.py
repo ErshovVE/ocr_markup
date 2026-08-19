@@ -1,11 +1,7 @@
-import os
-
 import streamlit as st
 
-from src.annotations import AnnotationManager
-from src.ui.editor_view import render_image_editor
-from src.ui.list_view import render_image_list
-from src.ui.sidebar import render_sidebar
+from src.ui.generation_view import render_generation_mode
+from src.ui.manual_mode import render_manual_mode
 
 st.set_page_config(layout="wide", page_title="Инструмент разметки OCR")
 
@@ -22,6 +18,7 @@ def init_session_state():
         "confirm_delete": None,
         "show_backups": False,
         "hotkey_trigger": 0,
+        "app_mode": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -32,6 +29,20 @@ def check_hotkeys():
     """Проверяет нажатие горячих клавиш через query params"""
     # Альтернативный метод через session storage и query params
     pass
+
+
+def render_mode_landing():
+    """Отрисовывает стартовый экран с выбором режима работы"""
+    st.subheader("Выберите режим работы")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🤖 Авторазметка", use_container_width=True):
+            st.session_state.app_mode = "generation"
+            st.rerun()
+    with col2:
+        if st.button("✍️ Ручная разметка", use_container_width=True):
+            st.session_state.app_mode = "manual"
+            st.rerun()
 
 
 def main():
@@ -55,63 +66,18 @@ def main():
 
     init_session_state()
 
-    # Загрузка файла
-    uploaded_file = st.file_uploader("Загрузите файл разметки (.txt)", type=["txt"])
+    if st.session_state.app_mode is None:
+        render_mode_landing()
+        return
 
-    if uploaded_file:
-        # Путь к рабочей директории
-        working_dir = st.text_input(
-            "Укажите рабочую директорию", placeholder="Например: G:/Датасет"
-        )
+    if st.button("🔁 Сменить режим", key="switch_mode"):
+        st.session_state.app_mode = None
+        st.rerun()
 
-        if not working_dir:
-            st.warning("Укажите рабочую директорию")
-            return
-
-        if not os.path.isdir(working_dir):
-            st.error("Указанная директория не существует")
-            return
-
-        # Инициализация менеджера
-        if st.session_state.manager is None:
-            annotation_file = os.path.join(working_dir, uploaded_file.name)
-            st.session_state.manager = AnnotationManager(working_dir, annotation_file)
-
-            file_contents = uploaded_file.read().decode("utf-8")
-            success, error = st.session_state.manager.load_from_file(file_contents)
-
-            if not success:
-                st.error(error)
-                return
-
-        manager = st.session_state.manager
-
-        # Получаем отфильтрованный список
-        filtered = manager.get_image_list(st.session_state.filter_option)
-
-        if not filtered:
-            st.warning("Нет изображений по выбранному фильтру")
-
-            # Позволяем изменить фильтр
-            filter_opts = {
-                "all": "Все",
-                "unmarked": "Неразмеченные",
-                "marked": "Размеченные",
-            }
-            st.radio("Показать:", list(filter_opts.values()), key="empty_filter")
-            return
-
-        # Основной интерфейс
-        col1, col2 = st.columns([1, 2])
-
-        with col1:
-            render_image_list(manager, filtered)
-
-        with col2:
-            render_image_editor(manager)
-
-        # Сайдбар - Статистика и управление бэкапами
-        render_sidebar(manager)
+    if st.session_state.app_mode == "generation":
+        render_generation_mode()
+    else:
+        render_manual_mode()
 
 
 if __name__ == "__main__":
