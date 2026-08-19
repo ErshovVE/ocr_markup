@@ -6,7 +6,7 @@ Frontend (`frontend/`) — Streamlit-приложение для разметк�
 
 | Файл | Ответственность |
 |---|---|
-| `frontend/app.py` | Точка входа: `st.set_page_config`, CSS, `init_session_state`, загрузка файла/рабочей директории, инициализация `AnnotationManager`, вызов `render_image_list`/`render_image_editor`/`render_sidebar` |
+| `frontend/app.py` | Тонкий роутер режимов: `st.set_page_config`, CSS, `init_session_state`, стартовый экран выбора режима (`render_mode_landing`), маршрутизация в `render_generation_mode`/`render_manual_mode` |
 | `frontend/src/models.py` | `ImageRecord` — структура данных для одной записи изображения |
 | `frontend/src/backup.py` | `BackupManager` — создание, ротация и восстановление резервных копий файла аннотаций |
 | `frontend/src/annotations.py` | `AnnotationManager` — загрузка/сохранение аннотаций, кэш статусов, удаление записей; `save_as_handwritten` — экспорт изображения как рукописного |
@@ -15,7 +15,8 @@ Frontend (`frontend/`) — Streamlit-приложение для разметк�
 | `frontend/src/ui/list_view.py` | `render_image_list` — список изображений с фильтром и пагинацией |
 | `frontend/src/ui/editor_view.py` | `render_image_editor` — редактор текущего изображения: текст, удаление, поворот, навигация |
 | `frontend/src/ui/sidebar.py` | `render_sidebar` — статистика, сохранение всех изменений, управление бэкапами |
-| `frontend/src/ui/consensus_view.py` | `render_consensus_section` — импорт результатов OCR-консенсуса из backend |
+| `frontend/src/ui/manual_mode.py` | `render_manual_mode` — перенесённый флоу ручной разметки: загрузка файла/рабочей директории, инициализация `AnnotationManager`, список/редактор/сайдбар |
+| `frontend/src/ui/generation_view.py` | `render_generation_mode` — статус моделей Paddle/Surya/Tesseract, запуск/статус OCR-консенсуса, handoff в ручной режим без file_uploader |
 
 Backend (`backend/`) — FastAPI-спайк консенсуса OCR: см. `backend/README.md`.
 
