@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from backend import models_status
 from backend.config import DEFAULT_SCORE_THRESHOLD
 from backend.jobs import get_job, start_job
 
@@ -20,14 +21,16 @@ class RunRequest(BaseModel):
     preferred_model: Optional[str] = None
 
 
+class PrepareRequest(BaseModel):
+    model: str
+
+
 @app.post("/run")
 def run(req: RunRequest):
     if not os.path.isdir(req.input_dir):
         raise HTTPException(400, f"input_dir не найдена: {req.input_dir}")
 
-    job_id = start_job(
-        req.input_dir, req.output_dir, req.score_threshold, req.preferred_model
-    )
+    job_id = start_job(req.input_dir, req.output_dir, req.score_threshold, req.preferred_model)
     return {"job_id": job_id}
 
 
@@ -45,3 +48,20 @@ def result(job_id: str):
     if job is None or job.status != "done":
         raise HTTPException(404, "Result not ready")
     return job.result
+
+
+@app.get("/models/status")
+def models_status_endpoint():
+    return {
+        name: {"status": state.status, "detail": state.detail}
+        for name, state in models_status.get_status().items()
+    }
+
+
+@app.post("/models/prepare")
+def models_prepare(req: PrepareRequest):
+    try:
+        models_status.prepare(req.model)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"status": "started"}
