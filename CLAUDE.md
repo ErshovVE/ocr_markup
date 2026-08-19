@@ -7,10 +7,10 @@
 - `predict.py` / `predict.ipynb` are separate offline OCR-labeling-data generation scripts with a heavier, unlisted dependency set (`opencv-python`, `surya-ocr`, `tqdm`, and a private `ocr_library` package) and hardcoded local model paths — they are not part of the Streamlit app and not installable from `requirements.txt` alone
 
 ## Code Style
-- `src/` package holds all logic (models, backup, annotations, image ops, hotkeys, UI rendering); `app1.py` is a thin entry point that wires session-state init + `src/` calls together — see `docs/architecture.md` for the module map
+- `src/` package holds all logic (models, backup, annotations, image ops, hotkeys, UI rendering); `app.py` is a thin entry point that wires session-state init + `src/` calls together — see `docs/architecture.md` for the module map
 - Russian-language UI strings, comments, and docstrings throughout — keep new code consistent with this
 - Heavy use of `st.session_state` as the primary state container (no external state management)
-- `app1.py` is the sole live entry point; the old `app.py` is archived at `legacy/app.py` for reference only and is not runnable as documented
+- `app.py` is the sole entry point
 - No type annotations modernization (`Dict`/`List`/`Optional` from `typing`, not `dict`/`list`/`X | None`) and no `frozen=True` on dataclasses — preserved intentionally, see `docs/architecture.md`
 
 ## Testing
@@ -19,15 +19,14 @@
 - Manual verification still required for the Streamlit UI flow itself: run the app and click through the labeling flow
 
 ## Build & Run
-- Dev: `streamlit run app1.py --server.enableXsrfProtection=false`
+- Dev: `streamlit run app.py --server.enableXsrfProtection=false`
 - Install deps: `pip install -r requirements.txt`; install dev deps (pytest, ruff): `pip install -r requirements-dev.txt`
 - Docker: `docker compose up --build` runs the Streamlit frontend and the `backend/` consensus spike as separate containers — see `docs/docker.md`
-- Build standalone exe: see `pyinst_command.txt` (PyInstaller, bundles `app.py` via `wrapper.py`) — **stale**: `wrapper.py`/`pyinst_command.txt` still reference the now-archived `app.py` path, not `app1.py`/`legacy/app.py`; needs fixing before the next `.exe` build (see `docs/architecture.md`)
+- Build standalone exe: see `pyinst_command.txt` (PyInstaller, bundles `app.py` via `wrapper.py`)
 - Lint/format: `ruff check .` / `ruff format .` (config in `pyproject.toml`) — see `docs/testing.md`
 
 ## Project Structure
-- `app1.py` — sole Streamlit entry point: page config, CSS, session-state init, file upload/working-dir wiring, calls into `src/`
-- `legacy/app.py` — archived, non-runnable-as-documented older entry point, kept for reference only
+- `app.py` — sole Streamlit entry point: page config, CSS, session-state init, file upload/working-dir wiring, calls into `src/`
 - `src/models.py` — `ImageRecord` dataclass
 - `src/backup.py` — `BackupManager`: create/rotate/restore backups
 - `src/annotations.py` — `AnnotationManager` (load/save/delete annotations, status cache) + `save_as_handwritten`
