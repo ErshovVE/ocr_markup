@@ -42,6 +42,8 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 - `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null}` → `{"job_id": str}`
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error", "error": str | null}`
 - `GET /result/{job_id}` → `{"output_dir": str, "good_count": int, "needs_review_count": int}`
+- `GET /models/status` → `{"paddle": {...}, "surya": {...}, "tesseract": {...}}`, каждое значение — `{"status": "not_checked"|"checking"|"ready"|"error", "detail": str|null}`
+- `POST /models/prepare` — `{"model": "paddle"|"surya"}` → `{"status": "started"}` (асинхронно инстанцирует движок в фоновом потоке, что триггерит скачивание/кэширование моделей; Tesseract сюда не передаётся — ставится вручную, см. раздел «Установка»)
 
 Состояние задач хранится в памяти процесса — перезапуск backend'а теряет
 историю запущенных задач (см. `backend/jobs.py`).
