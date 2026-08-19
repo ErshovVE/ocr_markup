@@ -5,7 +5,7 @@
 
 | Сервис | Dockerfile | Что внутри | Порт |
 |---|---|---|---|
-| `frontend` | `Dockerfile` (корень) | Streamlit-приложение `app.py` + `src/` | 8501 |
+| `frontend` | `frontend/Dockerfile` | Streamlit-приложение `frontend/app.py` + `frontend/src/` | 8501 |
 | `backend` | `backend/Dockerfile` | FastAPI-спайк консенсуса (`backend/`) — PaddleOCR + SuryaOCR + Tesseract | 8756 |
 
 ## Запуск через docker compose
@@ -28,10 +28,10 @@ docker compose up --build
 
 ## Сборка и запуск по отдельности
 
-Frontend:
+Frontend (контекст сборки — корень репозитория):
 
 ```bash
-docker build -t ocr-markup-frontend .
+docker build -f frontend/Dockerfile -t ocr-markup-frontend .
 docker run --rm -p 8501:8501 -v "$(pwd)/data:/data" ocr-markup-frontend
 ```
 
@@ -54,5 +54,5 @@ docker run --rm -p 8756:8756 -v "$(pwd)/data:/data" ocr-markup-backend
   сборка и первый запуск (скачивание ML-моделей) могут занять продолжительное
   время.
 - Frontend-образ не включает `predict.py`/`predict.ipynb` и
-  PyInstaller-обвязку (`wrapper.py`, `pyinst_command.txt`) — они не участвуют в
-  запуске приложения (см. `CLAUDE.md`).
+  PyInstaller-обвязку (`frontend/wrapper.py`, `frontend/pyinst_command.txt`) —
+  они не участвуют в запуске приложения (см. `CLAUDE.md`).

@@ -8,12 +8,12 @@ __pycache__
 data
 .backups
 *.backup
-tests
+**/tests
 .pytest_cache
 .ruff_cache
 docs
 predict.py
 predict.ipynb
 legacy
-wrapper.py
-pyinst_command.txt
+frontend/wrapper.py
+frontend/pyinst_command.txt

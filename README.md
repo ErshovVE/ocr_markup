@@ -14,8 +14,15 @@
 ## Установка и запуск:
 
 1. Клонируйте репозиторий.
-2. Установите зависимости: `pip install -r requirements.txt`.
-3. Запустите приложение: `streamlit run app.py --server.enableXsrfProtection=false`.
+2. Установите зависимости: `pip install -r frontend/requirements.txt`.
+3. Запустите приложение из папки `frontend/`: `streamlit run app.py --server.enableXsrfProtection=false`.
+
+## Структура репозитория
+
+- `frontend/` — Streamlit-приложение разметки (`app.py`, `src/`)
+- `backend/` — FastAPI-спайк OCR-консенсуса (`backend/README.md`)
+
+Подробнее — в [docs/architecture.md](docs/architecture.md).
 
 ## Docker
 

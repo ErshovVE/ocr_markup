@@ -1,6 +1,6 @@
 # Backend: OCR Consensus (спайк) — FastAPI + PaddleOCR/SuryaOCR/Tesseract.
 # Собирать из корня репозитория: docker build -f backend/Dockerfile .
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # tesseract-ocr-rus — системный языковой пакет, без него pytesseract lang="rus" падает.
 # libgl1/libglib2.0-0 — рантайм-зависимости opencv-python на slim-образе.
