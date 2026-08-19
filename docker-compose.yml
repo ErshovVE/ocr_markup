@@ -18,7 +18,7 @@ services:
       - "8756:8756"
     volumes:
       - ./data:/data
-      - paddleocr-models:/root/.paddlex
+      - paddleocr-models:/root/.paddleocr
       - surya-models:/root/.cache/huggingface
     environment:
       - PYTHONUNBUFFERED=1

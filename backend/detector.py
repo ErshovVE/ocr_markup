@@ -13,7 +13,7 @@ class Detector:
         """Возвращает список полигонов (боксов) строк текста"""
         try:
             result = self._ocr.ocr(image, rec=False)
-            return result[0] if result else []
+            return result[0] if result and result[0] else []
         except Exception as e:
             print(f"Ошибка детекции: {e}")
             return []
