@@ -69,6 +69,11 @@ def _render_run_controls():
         [None, "paddle", "surya", "tesseract"],
         key="consensus_preferred",
     )
+    extract_pdf_text_layer = st.checkbox(
+        "Извлекать текст из PDF напрямую, без OCR (если есть текстовый слой)",
+        value=True,
+        key="consensus_extract_pdf",
+    )
 
     if st.button("▶ Запустить", key="consensus_run"):
         try:
@@ -79,6 +84,7 @@ def _render_run_controls():
                     "output_dir": output_dir,
                     "score_threshold": threshold,
                     "preferred_model": preferred,
+                    "extract_pdf_text_layer": extract_pdf_text_layer,
                 },
                 timeout=5,
             )

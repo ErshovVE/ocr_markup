@@ -48,7 +48,7 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium"}` → `{"job_id": str}`
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool}` → `{"job_id": str}`
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error", "error": str | null}`
 - `GET /result/{job_id}` → `{"output_dir": str, "good_count": int, "needs_review_count": int}`
 - `GET /models/status` → `{"paddle": {...}, "surya": {...}, "tesseract": {...}}`, каждое значение — `{"status": "not_checked"|"checking"|"ready"|"error", "detail": str|null}`
@@ -56,3 +56,25 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 
 Состояние задач хранится в памяти процесса — перезапуск backend'а теряет
 историю запущенных задач (см. `backend/jobs.py`).
+
+## PDF
+
+Входная папка (`input_dir`) может содержать `.pdf`-файлы наравне с
+изображениями. Для каждого PDF сначала проверяются первые 2 страницы на
+наличие извлекаемого текстового слоя (`extract_pdf_text_layer=true`,
+значение по умолчанию):
+
+- **Есть текстовый слой** — текст и координаты вытаскиваются напрямую через
+  `pypdfium2` (без OCR), каждая строка сразу попадает в `good.txt`.
+  Страницы без текста внутри такого документа пропускаются (не отправляются
+  в OCR-fallback).
+- **Нет текстового слоя** (в т.ч. если текст появляется только начиная с
+  3-й страницы — проверяются только первые 2) — документ обрабатывается
+  постранично как обычное растровое изображение, через тот же
+  3-движковый OCR-консенсус.
+
+**Известное ограничение**: "текстовый слой" не отличается от текста,
+добавленного самим сканером (searchable PDF от сканирующего ПО) — такой слой
+может быть неточным (собственный OCR сканера), но будет доверчиво помечен
+как `good`. Для папок с такими сканами явно выключайте
+`extract_pdf_text_layer`.
