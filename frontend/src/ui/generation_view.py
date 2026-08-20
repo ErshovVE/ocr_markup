@@ -63,7 +63,6 @@ def _render_model_status():
 def _render_run_controls():
     input_dir = st.text_input("Папка с документами", key="consensus_input")
     output_dir = st.text_input("Папка вывода", key="consensus_output")
-    threshold = st.slider("Порог уверенности", 0.0, 1.0, 0.95, key="consensus_threshold")
     preferred = st.selectbox(
         "Предпочитаемая модель (при разногласии)",
         [None, "paddle", "surya", "tesseract"],
@@ -74,6 +73,7 @@ def _render_run_controls():
         value=True,
         key="consensus_extract_pdf",
     )
+    threshold = st.slider("Порог уверенности", 0.0, 1.0, 0.95, key="consensus_threshold")
 
     if st.button("▶ Запустить", key="consensus_run"):
         try:

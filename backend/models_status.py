@@ -1,16 +1,27 @@
 """Статус готовности движков распознавания (Paddle/Surya/Tesseract).
 
 Состояние Paddle/Surya хранится в памяти процесса (см. backend/jobs.py) —
-при перезапуске backend'а сбрасывается в "not_checked". Tesseract
+при перезапуске backend'а сбрасывается в "not_checked". Пока оно не было
+проверено в текущем запуске, статус дополняется проверкой кэша моделей на
+диске (веса переживают перезапуск контейнера, см. volumes в
+docker-compose.yml) — по тому же алгоритму, что используют сами
+paddlex/surya для решения "уже скачано, докачивать не нужно". Tesseract
 проверяется заново при каждом запросе статуса, т.к. это системный бинарник,
 а не lazy-loaded Python-объект.
 """
 
+import json
+import os
 import shutil
 import subprocess
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional
+
+from platformdirs import user_cache_dir
+
+PADDLE_CYRILLIC_MODEL_NAME = "cyrillic_PP-OCRv5_mobile_rec"
 
 
 @dataclass
@@ -38,10 +49,43 @@ def check_tesseract() -> ModelState:
     return ModelState("ready")
 
 
+def _manifest_complete(model_dir: Path) -> bool:
+    """Повторяет check_manifest() из surya/common/s3.py: модель считается
+    скачанной, если рядом с файлами лежит manifest.json и все перечисленные
+    в нём файлы присутствуют на диске."""
+    manifest_path = model_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return all((model_dir / f).exists() for f in manifest["files"])
+    except Exception:
+        return False
+
+
+def _surya_weights_on_disk() -> bool:
+    recognition_dir = Path(user_cache_dir("datalab")) / "models" / "text_recognition"
+    if not recognition_dir.is_dir():
+        return False
+    return any(_manifest_complete(d) for d in recognition_dir.iterdir() if d.is_dir())
+
+
+def _paddle_weights_on_disk() -> bool:
+    cache_dir = os.environ.get(
+        "PADDLE_PDX_CACHE_HOME", os.path.expanduser("~/.paddlex")
+    )
+    model_dir = Path(cache_dir) / "official_models" / PADDLE_CYRILLIC_MODEL_NAME
+    return model_dir.is_dir() and any(model_dir.iterdir())
+
+
 def get_status() -> Dict[str, ModelState]:
     with _lock:
         snapshot = dict(_state)
     snapshot["tesseract"] = check_tesseract()
+    if snapshot["paddle"].status == "not_checked" and _paddle_weights_on_disk():
+        snapshot["paddle"] = ModelState("ready", "Найдено в кэше на диске")
+    if snapshot["surya"].status == "not_checked" and _surya_weights_on_disk():
+        snapshot["surya"] = ModelState("ready", "Найдено в кэше на диске")
     return snapshot
 
 
