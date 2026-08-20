@@ -6,6 +6,14 @@ PaddleOCR/SuryaOCR/TesseractOCR распознаватели). Не включё
 изолированы намеренно.
 
 Детектор строк использует PaddleOCR PP-OCRv6 (детекция не зависит от языка).
+
+Детектор строк текста выбирается независимо от консенсуса распознавания —
+`detector_engine` в `/run` принимает `paddle` (по умолчанию), `surya` или
+`tesseract`. Распознавание всегда прогоняется всеми 3 движками одновременно
+и голосует за итоговый текст — `detector_engine` влияет только на то, какой
+движок находит боксы строк, `preferred_model` остаётся тай-брейком только
+для голосования распознавания.
+
 Распознавание по умолчанию (`lang="ru"`) использует кириллическую модель
 `cyrillic_PP-OCRv5_mobile_rec` — PP-OCRv6 её не заменяет, так как её 50 языков
 это китайский/японский/английский и 46 языков на латинице, кириллица не
@@ -48,11 +56,11 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool}` → `{"job_id": str}`
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract"}` → `{"job_id": str}`
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error", "error": str | null}`
 - `GET /result/{job_id}` → `{"output_dir": str, "good_count": int, "needs_review_count": int}`
-- `GET /models/status` → `{"paddle": {...}, "surya": {...}, "tesseract": {...}}`, каждое значение — `{"status": "not_checked"|"checking"|"ready"|"error", "detail": str|null}`
-- `POST /models/prepare` — `{"model": "paddle"|"surya"}` → `{"status": "started"}` (асинхронно инстанцирует движок в фоновом потоке, что триггерит скачивание/кэширование моделей; Tesseract сюда не передаётся — ставится вручную, см. раздел «Установка»)
+- `GET /models/status` → `{"paddle": {...}, "surya": {...}, "paddle_detector": {...}, "surya_detector": {...}, "tesseract": {...}}`, каждое значение — `{"status": "not_checked"|"checking"|"ready"|"error", "detail": str|null}`. `paddle`/`surya` — модели распознавания; `paddle_detector`/`surya_detector` — отдельные, независимо скачиваемые модели детекции строк для тех же движков; `tesseract` — общий (детекция и распознавание используют один и тот же системный бинарник)
+- `POST /models/prepare` — `{"model": "paddle"|"surya"|"paddle_detector"|"surya_detector"}` → `{"status": "started"}` (асинхронно инстанцирует движок в фоновом потоке, что триггерит скачивание/кэширование моделей; Tesseract сюда не передаётся — ставится вручную, см. раздел «Установка»)
 
 Состояние задач хранится в памяти процесса — перезапуск backend'а теряет
 историю запущенных задач (см. `backend/jobs.py`).

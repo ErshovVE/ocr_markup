@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Dict, Literal, Optional
 
 from backend import pipeline
+from backend.detector import DEFAULT_DETECTOR_ENGINE
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE
 
 JobStatus = Literal["running", "done", "error"]
@@ -35,6 +36,7 @@ def _run_job(
     lang: str,
     latin_model_size: str,
     extract_pdf_text_layer: bool,
+    detector_engine: str,
 ):
     try:
         good_count, needs_review_count = pipeline.run(
@@ -45,6 +47,7 @@ def _run_job(
             lang,
             latin_model_size,
             extract_pdf_text_layer,
+            detector_engine,
         )
         _jobs[job_id] = JobState(
             status="done",
@@ -66,6 +69,7 @@ def start_job(
     lang: str = "ru",
     latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE,
     extract_pdf_text_layer: bool = True,
+    detector_engine: str = DEFAULT_DETECTOR_ENGINE,
 ) -> str:
     """Запускает pipeline.run в фоновом потоке и сразу возвращает job_id"""
     job_id = str(uuid.uuid4())
@@ -81,6 +85,7 @@ def start_job(
             lang,
             latin_model_size,
             extract_pdf_text_layer,
+            detector_engine,
         ),
         daemon=True,
     )
