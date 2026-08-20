@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from backend import models_status
 from backend.config import DEFAULT_SCORE_THRESHOLD
+from backend.detector import DEFAULT_DETECTOR_ENGINE, DETECTOR_ENGINES
 from backend.jobs import get_job, start_job
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE, LATIN_MODEL_SIZES
 
@@ -29,6 +30,9 @@ class RunRequest(BaseModel):
     # вытащить текст+координаты напрямую (без OCR) и сразу пометить как good.
     # См. backend/README.md, раздел "PDF".
     extract_pdf_text_layer: bool = True
+    # Движок детекции строк текста — независим от preferred_model
+    # (который влияет только на голосование распознавания).
+    detector_engine: str = DEFAULT_DETECTOR_ENGINE
 
 
 class PrepareRequest(BaseModel):
@@ -47,6 +51,11 @@ def run(req: RunRequest):
             f"latin_model_size должен быть одним из {LATIN_MODEL_SIZES}: "
             f"{req.latin_model_size}",
         )
+    if req.detector_engine not in DETECTOR_ENGINES:
+        raise HTTPException(
+            400,
+            f"detector_engine должен быть одним из {DETECTOR_ENGINES}: {req.detector_engine}",
+        )
 
     job_id = start_job(
         req.input_dir,
@@ -56,6 +65,7 @@ def run(req: RunRequest):
         req.lang,
         req.latin_model_size,
         req.extract_pdf_text_layer,
+        req.detector_engine,
     )
     return {"job_id": job_id}
 
