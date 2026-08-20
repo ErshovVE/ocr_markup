@@ -34,10 +34,17 @@ def _run_job(
     preferred_model: Optional[str],
     lang: str,
     latin_model_size: str,
+    extract_pdf_text_layer: bool,
 ):
     try:
         good_count, needs_review_count = pipeline.run(
-            input_dir, output_dir, threshold, preferred_model, lang, latin_model_size
+            input_dir,
+            output_dir,
+            threshold,
+            preferred_model,
+            lang,
+            latin_model_size,
+            extract_pdf_text_layer,
         )
         _jobs[job_id] = JobState(
             status="done",
@@ -58,6 +65,7 @@ def start_job(
     preferred_model: Optional[str] = None,
     lang: str = "ru",
     latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE,
+    extract_pdf_text_layer: bool = True,
 ) -> str:
     """Запускает pipeline.run в фоновом потоке и сразу возвращает job_id"""
     job_id = str(uuid.uuid4())
@@ -72,6 +80,7 @@ def start_job(
             preferred_model,
             lang,
             latin_model_size,
+            extract_pdf_text_layer,
         ),
         daemon=True,
     )

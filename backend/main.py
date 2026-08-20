@@ -25,6 +25,10 @@ class RunRequest(BaseModel):
     # текста; tesseract при этом тоже переключается на lang="eng".
     lang: str = "ru"
     latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE
+    # Если во входной папке есть PDF с извлекаемым текстовым слоем —
+    # вытащить текст+координаты напрямую (без OCR) и сразу пометить как good.
+    # См. backend/README.md, раздел "PDF".
+    extract_pdf_text_layer: bool = True
 
 
 class PrepareRequest(BaseModel):
@@ -51,6 +55,7 @@ def run(req: RunRequest):
         req.preferred_model,
         req.lang,
         req.latin_model_size,
+        req.extract_pdf_text_layer,
     )
     return {"job_id": job_id}
 

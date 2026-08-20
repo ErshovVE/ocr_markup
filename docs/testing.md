@@ -13,11 +13,16 @@ pytest
 pytest --cov=src --cov=backend --cov-report=term-missing
 ```
 
-Тесты покрывают `src/` (модели, бэкапы, аннотации) и `backend/consensus.py`.
+Тесты покрывают `src/` (модели, бэкапы, аннотации), `backend/consensus.py`
+и `backend/pdf_extract.py`.
 `backend/detector.py` и `backend/recognizers.py` не тестируются — они лениво
 импортируют тяжёлые ML-зависимости (PaddleOCR, SuryaOCR, pytesseract) только
 внутри методов и требуют реальных моделей/системного Tesseract, что не подходит
-для юнит-тестов (см. `backend/README.md`).
+для юнит-тестов (см. `backend/README.md`). `backend/pdf_extract.py`
+использует `pypdfium2` — лёгкую самодостаточную библиотеку без скачиваемых
+моделей и системных бинарников — поэтому, в отличие от них, полностью
+юнит-тестируется на синтетических PDF (`pypdfium2` и `numpy` добавлены в
+`requirements-dev.txt` именно для этого).
 
 ## Линтер
 
