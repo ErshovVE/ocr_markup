@@ -21,7 +21,14 @@ from typing import Dict, Optional
 
 from platformdirs import user_cache_dir
 
-PADDLE_CYRILLIC_MODEL_NAME = "cyrillic_PP-OCRv5_mobile_rec"
+PADDLE_MODEL_NAMES = {
+    "paddle": "cyrillic_PP-OCRv5_mobile_rec",
+    "paddle_detector": "PP-OCRv6_medium_det",
+}
+SURYA_MODEL_TYPES = {
+    "surya": "text_recognition",
+    "surya_detector": "text_detection",
+}
 
 
 @dataclass
@@ -68,16 +75,16 @@ def _manifest_complete(model_dir: Path) -> bool:
         return False
 
 
-def _surya_weights_on_disk() -> bool:
-    recognition_dir = Path(user_cache_dir("datalab")) / "models" / "text_recognition"
-    if not recognition_dir.is_dir():
+def _surya_weights_on_disk(model_type: str) -> bool:
+    model_type_dir = Path(user_cache_dir("datalab")) / "models" / model_type
+    if not model_type_dir.is_dir():
         return False
-    return any(_manifest_complete(d) for d in recognition_dir.iterdir() if d.is_dir())
+    return any(_manifest_complete(d) for d in model_type_dir.iterdir() if d.is_dir())
 
 
-def _paddle_weights_on_disk() -> bool:
+def _paddle_weights_on_disk(model_name: str) -> bool:
     cache_dir = os.environ.get("PADDLE_PDX_CACHE_HOME", os.path.expanduser("~/.paddlex"))
-    model_dir = Path(cache_dir) / "official_models" / PADDLE_CYRILLIC_MODEL_NAME
+    model_dir = Path(cache_dir) / "official_models" / model_name
     return model_dir.is_dir() and any(model_dir.iterdir())
 
 
@@ -85,10 +92,12 @@ def get_status() -> Dict[str, ModelState]:
     with _lock:
         snapshot = dict(_state)
     snapshot["tesseract"] = check_tesseract()
-    if snapshot["paddle"].status == "not_checked" and _paddle_weights_on_disk():
-        snapshot["paddle"] = ModelState("ready", "Найдено в кэше на диске")
-    if snapshot["surya"].status == "not_checked" and _surya_weights_on_disk():
-        snapshot["surya"] = ModelState("ready", "Найдено в кэше на диске")
+    for key, model_name in PADDLE_MODEL_NAMES.items():
+        if snapshot[key].status == "not_checked" and _paddle_weights_on_disk(model_name):
+            snapshot[key] = ModelState("ready", "Найдено в кэше на диске")
+    for key, model_type in SURYA_MODEL_TYPES.items():
+        if snapshot[key].status == "not_checked" and _surya_weights_on_disk(model_type):
+            snapshot[key] = ModelState("ready", "Найдено в кэше на диске")
     return snapshot
 
 
