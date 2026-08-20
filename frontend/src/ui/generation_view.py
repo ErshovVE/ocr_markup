@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 import requests
 import streamlit as st
@@ -77,7 +78,41 @@ def _render_model_status():
         st.rerun()
 
 
+def _adopt_active_job():
+    """Восстанавливает job_id уже выполняющегося задания в session_state.
+
+    Streamlit создаёт новую сессию (и обнуляет session_state) на перезагрузку
+    страницы, поэтому без этого трекер прогресса "терялся" бы после F5, хотя
+    задание в backend продолжает выполняться (backend/jobs.py допускает
+    только одно активное задание, см. GET /jobs/active).
+    """
+    try:
+        resp = requests.get(f"{BACKEND_URL}/jobs/active", timeout=5)
+        resp.raise_for_status()
+        job_id = resp.json().get("job_id")
+        if job_id:
+            st.session_state.consensus_job_id = job_id
+    except Exception:
+        pass
+
+
+def _format_backend_error(e: Exception) -> str:
+    """Достаёт JSON-поле detail из ответа FastAPI, если оно есть — иначе str(e)"""
+    response = getattr(e, "response", None)
+    if response is not None:
+        try:
+            detail = response.json().get("detail")
+            if detail:
+                return detail
+        except ValueError:
+            pass
+    return str(e)
+
+
 def _render_run_controls():
+    if "consensus_job_id" not in st.session_state:
+        _adopt_active_job()
+
     extract_pdf_text_layer = st.checkbox(
         "Извлекать текст из PDF напрямую, без OCR (если есть текстовый слой)",
         value=True,
@@ -113,21 +148,13 @@ def _render_run_controls():
             )
             resp.raise_for_status()
             st.session_state.consensus_job_id = resp.json()["job_id"]
+            st.session_state.pop("consensus_status_data", None)
             st.success("Запущено")
         except Exception as e:
-            st.error(f"Ошибка запуска: {e}")
+            st.error(f"Ошибка запуска: {_format_backend_error(e)}")
 
     if st.session_state.get("consensus_job_id"):
-        if st.button("🔄 Статус", key="consensus_status"):
-            try:
-                resp = requests.get(
-                    f"{BACKEND_URL}/status/{st.session_state.consensus_job_id}",
-                    timeout=5,
-                )
-                resp.raise_for_status()
-                st.info(resp.json()["status"])
-            except Exception as e:
-                st.error(f"Ошибка статуса: {e}")
+        _render_live_tracker()
 
         if st.button("📥 Перейти к разметке результатов", key="consensus_to_manual"):
             manager = _build_manager_from_output(output_dir)
@@ -135,6 +162,56 @@ def _render_run_controls():
                 st.session_state.manager = manager
                 st.session_state.app_mode = "manual"
                 st.rerun()
+
+
+@st.experimental_fragment(run_every="2s")
+def _render_live_tracker():
+    """Опрашивает GET /status раз в 2с, пока задание не завершится (см. #st.experimental_fragment).
+
+    Именно experimental_fragment, а не st.fragment: последний появился в
+    streamlit 1.37, а в проекте зафиксирована 1.36.0 (frontend/requirements.txt).
+    """
+    job_id = st.session_state.get("consensus_job_id")
+    if not job_id:
+        return
+
+    status_data = st.session_state.get("consensus_status_data")
+    if status_data and status_data["status"] in ("done", "error"):
+        _render_progress_tracker(status_data)
+        return
+
+    try:
+        resp = requests.get(f"{BACKEND_URL}/status/{job_id}", timeout=5)
+        resp.raise_for_status()
+        st.session_state.consensus_status_data = resp.json()
+    except Exception as e:
+        st.error(f"Ошибка статуса: {e}")
+        return
+
+    _render_progress_tracker(st.session_state.consensus_status_data)
+
+
+def _render_progress_tracker(status_data: Optional[dict]):
+    """Отрисовывает трекер прогресса задания по данным GET /status"""
+    if not status_data:
+        return
+
+    st.info(status_data["status"])
+    if status_data.get("error"):
+        st.error(status_data["error"])
+
+    found = status_data.get("docs_found", 0)
+    processed = status_data.get("docs_processed", 0)
+    good = status_data.get("good_count", 0)
+    review = status_data.get("review_count", 0)
+    diverged = status_data.get("diverged_count", 0)
+
+    st.caption(f"Документов обработано: {processed} / {found}")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Строк всего", good + review)
+    col2.metric("Хороших", good)
+    col3.metric("Плохих", review)
+    col4.metric("Уверенных, но разошедшихся", diverged)
 
 
 def _build_manager_from_output(output_dir: str):

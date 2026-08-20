@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from backend import models_status
 from backend.config import DEFAULT_SCORE_THRESHOLD
 from backend.detector import DEFAULT_DETECTOR_ENGINE, DETECTOR_ENGINES
-from backend.jobs import get_job, start_job
+from backend.jobs import get_active_job_id, get_job, start_job
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE, LATIN_MODEL_SIZES
 
 # Локальный однопользовательский сервис без аутентификации (см. backend/README.md) —
@@ -57,17 +57,28 @@ def run(req: RunRequest):
             f"detector_engine должен быть одним из {DETECTOR_ENGINES}: {req.detector_engine}",
         )
 
-    job_id = start_job(
-        req.input_dir,
-        req.output_dir,
-        req.score_threshold,
-        req.preferred_model,
-        req.lang,
-        req.latin_model_size,
-        req.extract_pdf_text_layer,
-        req.detector_engine,
-    )
+    try:
+        job_id = start_job(
+            req.input_dir,
+            req.output_dir,
+            req.score_threshold,
+            req.preferred_model,
+            req.lang,
+            req.latin_model_size,
+            req.extract_pdf_text_layer,
+            req.detector_engine,
+        )
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e
     return {"job_id": job_id}
+
+
+@app.get("/jobs/active")
+def active_job():
+    """Возвращает job_id текущего выполняющегося задания (или null), чтобы
+    фронтенд мог восстановить трекер прогресса после перезагрузки страницы —
+    Streamlit создаёт новую сессию на F5 и теряет session_state."""
+    return {"job_id": get_active_job_id()}
 
 
 @app.get("/status/{job_id}")
@@ -75,7 +86,15 @@ def status(job_id: str):
     job = get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    return {"status": job.status, "error": job.error}
+    return {
+        "status": job.status,
+        "error": job.error,
+        "docs_found": job.docs_found,
+        "docs_processed": job.docs_processed,
+        "good_count": job.good_count,
+        "review_count": job.review_count,
+        "diverged_count": job.diverged_count,
+    }
 
 
 @app.get("/result/{job_id}")
