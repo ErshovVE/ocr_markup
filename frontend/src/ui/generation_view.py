@@ -53,8 +53,6 @@ def _render_engine_status_row(label, status_key, downloadable, key_prefix):
 
 def _render_model_status():
     st.subheader("Модели")
-    if st.button("🔄 Обновить статус", key="models_refresh"):
-        st.session_state.pop("models_status_cache", None)
 
     if "models_status_cache" not in st.session_state:
         try:
@@ -74,8 +72,17 @@ def _render_model_status():
         status_key = DETECTOR_STATUS_KEYS[name]
         _render_engine_status_row(label, status_key, status_key != "tesseract", "det")
 
+    if st.button("🔄 Обновить статус", key="models_refresh"):
+        st.session_state.pop("models_status_cache", None)
+        st.rerun()
+
 
 def _render_run_controls():
+    extract_pdf_text_layer = st.checkbox(
+        "Извлекать текст из PDF напрямую, без OCR (если есть текстовый слой)",
+        value=True,
+        key="consensus_extract_pdf",
+    )
     input_dir = st.text_input("Папка с документами", key="consensus_input")
     output_dir = st.text_input("Папка вывода", key="consensus_output")
     detector_engine = st.selectbox(
@@ -87,11 +94,6 @@ def _render_run_controls():
         "Предпочитаемая модель (при разногласии)",
         [None, "paddle", "surya", "tesseract"],
         key="consensus_preferred",
-    )
-    extract_pdf_text_layer = st.checkbox(
-        "Извлекать текст из PDF напрямую, без OCR (если есть текстовый слой)",
-        value=True,
-        key="consensus_extract_pdf",
     )
     threshold = st.slider("Порог уверенности", 0.0, 1.0, 0.95, key="consensus_threshold")
 
