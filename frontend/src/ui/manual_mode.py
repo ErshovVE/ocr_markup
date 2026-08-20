@@ -16,7 +16,7 @@ def render_manual_mode():
             return
 
         working_dir = st.text_input(
-            "Укажите рабочую директорию", placeholder="Например: G:/Датасет"
+            "Укажите рабочую директорию", placeholder="Например: /data/Датасет"
         )
 
         if not working_dir:

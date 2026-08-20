@@ -128,8 +128,12 @@ def _render_run_controls():
         _adopt_active_job()
 
     col_in, col_out = st.columns(2)
-    input_dir = col_in.text_input("Папка с документами", key="consensus_input")
-    output_dir = col_out.text_input("Папка вывода", key="consensus_output")
+    input_dir = col_in.text_input(
+        "Папка с документами", key="consensus_input", placeholder="Например: /data/Датасет"
+    )
+    output_dir = col_out.text_input(
+        "Папка вывода", key="consensus_output", placeholder="Например: /data/Датасет_результат"
+    )
 
     col_det, col_pref, col_thr = st.columns(3)
     detector_engine = col_det.selectbox(
