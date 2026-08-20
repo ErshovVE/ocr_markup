@@ -13,6 +13,11 @@ STATUS_LABELS = {
     "error": "❌ Ошибка",
     "not_checked": "⚪ Не проверено",
 }
+JOB_STATUS_LABELS = {
+    "running": "⏳ Выполняется",
+    "done": "✅ Готово",
+    "error": "❌ Ошибка",
+}
 ENGINES = (("paddle", "PaddleOCR"), ("surya", "SuryaOCR"), ("tesseract", "Tesseract"))
 DETECTOR_STATUS_KEYS = {
     "paddle": "paddle_detector",
@@ -22,39 +27,45 @@ DETECTOR_STATUS_KEYS = {
 
 
 def render_generation_mode():
-    """Отрисовывает режим авторазметки: статус моделей + запуск консенсуса + handoff"""
+    """Отрисовывает режим авторазметки: статус моделей + запуск консенсуса + handoff.
+
+    Разбито на вкладки (а не один длинный столбец), чтобы окно не приходилось
+    прокручивать — статус моделей и форма запуска редко нужны одновременно.
+    """
     st.header("🤖 Авторазметка")
-    _render_model_status()
-    st.divider()
-    _render_run_controls()
+    tab_models, tab_run = st.tabs(["📦 Модели", "▶ Запуск"])
+    with tab_models:
+        _render_model_status()
+    with tab_run:
+        _render_run_controls()
 
 
-def _render_engine_status_row(label, status_key, downloadable, key_prefix):
+def _render_engine_status_cell(col, status_key, downloadable, key_prefix):
+    """Рисует статус одного движка в ячейке таблицы: текст + кнопка «Скачать» под ним, если нужна"""
     info = st.session_state.models_status_cache.get(status_key, {})
     status = info.get("status", "not_checked")
-    col1, col2, col3 = st.columns([2, 2, 1])
-    col1.write(label)
-    col2.write(STATUS_LABELS.get(status, status))
-    if downloadable and status not in ("ready", "checking"):
-        if col3.button("Скачать", key=f"prepare_{key_prefix}_{status_key}"):
-            try:
-                resp = requests.post(
-                    f"{BACKEND_URL}/models/prepare",
-                    json={"model": status_key},
-                    timeout=5,
-                )
-                resp.raise_for_status()
-                st.session_state.pop("models_status_cache", None)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Ошибка запуска подготовки: {e}")
+    text = STATUS_LABELS.get(status, status)
     if info.get("detail"):
-        st.caption(info["detail"])
+        text += f" · {info['detail']}"
+    with col:
+        st.write(text)
+        if downloadable and status not in ("ready", "checking"):
+            if st.button("Скачать", key=f"prepare_{key_prefix}_{status_key}"):
+                try:
+                    resp = requests.post(
+                        f"{BACKEND_URL}/models/prepare",
+                        json={"model": status_key},
+                        timeout=5,
+                    )
+                    resp.raise_for_status()
+                    st.session_state.pop("models_status_cache", None)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка запуска подготовки: {e}")
 
 
 def _render_model_status():
-    st.subheader("Модели")
-
+    """Компактная таблица движок × (распознавание, детекция) вместо построчного списка"""
     if "models_status_cache" not in st.session_state:
         try:
             resp = requests.get(f"{BACKEND_URL}/models/status", timeout=5)
@@ -64,14 +75,17 @@ def _render_model_status():
             st.error(f"Backend недоступен: {e}")
             return
 
-    st.markdown("**Модели распознавания**")
-    for name, label in ENGINES:
-        _render_engine_status_row(label, name, name != "tesseract", "rec")
+    header = st.columns([2, 3, 3])
+    header[0].markdown("**Движок**")
+    header[1].markdown("**Распознавание**")
+    header[2].markdown("**Детекция строк**")
 
-    st.markdown("**Модели детекции строк**")
     for name, label in ENGINES:
-        status_key = DETECTOR_STATUS_KEYS[name]
-        _render_engine_status_row(label, status_key, status_key != "tesseract", "det")
+        row = st.columns([2, 3, 3])
+        row[0].write(label)
+        _render_engine_status_cell(row[1], name, name != "tesseract", "rec")
+        det_key = DETECTOR_STATUS_KEYS[name]
+        _render_engine_status_cell(row[2], det_key, det_key != "tesseract", "det")
 
     if st.button("🔄 Обновить статус", key="models_refresh"):
         st.session_state.pop("models_status_cache", None)
@@ -113,24 +127,28 @@ def _render_run_controls():
     if "consensus_job_id" not in st.session_state:
         _adopt_active_job()
 
+    col_in, col_out = st.columns(2)
+    input_dir = col_in.text_input("Папка с документами", key="consensus_input")
+    output_dir = col_out.text_input("Папка вывода", key="consensus_output")
+
+    col_det, col_pref, col_thr = st.columns(3)
+    detector_engine = col_det.selectbox(
+        "Детектор строк текста",
+        ["paddle", "surya", "tesseract"],
+        key="consensus_detector",
+    )
+    preferred = col_pref.selectbox(
+        "Предпочитаемая модель (при разногласии)",
+        [None, "paddle", "surya", "tesseract"],
+        key="consensus_preferred",
+    )
+    threshold = col_thr.slider("Порог уверенности", 0.0, 1.0, 0.95, key="consensus_threshold")
+
     extract_pdf_text_layer = st.checkbox(
         "Извлекать текст из PDF напрямую, без OCR (если есть текстовый слой)",
         value=True,
         key="consensus_extract_pdf",
     )
-    input_dir = st.text_input("Папка с документами", key="consensus_input")
-    output_dir = st.text_input("Папка вывода", key="consensus_output")
-    detector_engine = st.selectbox(
-        "Детектор строк текста",
-        ["paddle", "surya", "tesseract"],
-        key="consensus_detector",
-    )
-    preferred = st.selectbox(
-        "Предпочитаемая модель (при разногласии)",
-        [None, "paddle", "surya", "tesseract"],
-        key="consensus_preferred",
-    )
-    threshold = st.slider("Порог уверенности", 0.0, 1.0, 0.95, key="consensus_threshold")
 
     if st.button("▶ Запустить", key="consensus_run"):
         try:
@@ -196,22 +214,22 @@ def _render_progress_tracker(status_data: Optional[dict]):
     if not status_data:
         return
 
-    st.info(status_data["status"])
-    if status_data.get("error"):
-        st.error(status_data["error"])
-
     found = status_data.get("docs_found", 0)
     processed = status_data.get("docs_processed", 0)
     good = status_data.get("good_count", 0)
     review = status_data.get("review_count", 0)
     diverged = status_data.get("diverged_count", 0)
 
-    st.caption(f"Документов обработано: {processed} / {found}")
+    status_label = JOB_STATUS_LABELS.get(status_data["status"], status_data["status"])
+    st.caption(f"{status_label} · документов {processed} / {found}")
+    if status_data.get("error"):
+        st.error(status_data["error"])
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Строк всего", good + review)
     col2.metric("Хороших", good)
     col3.metric("Плохих", review)
-    col4.metric("Уверенных, но разошедшихся", diverged)
+    col4.metric("Разошедшихся", diverged)
 
 
 def _build_manager_from_output(output_dir: str):
