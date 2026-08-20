@@ -8,15 +8,15 @@ from backend import models_status
 @pytest.fixture(autouse=True)
 def reset_model_state():
     """Изолирует тесты друг от друга — _state общий module-level словарь"""
-    models_status._state = {
+    state = {
         "paddle": models_status.ModelState(),
         "surya": models_status.ModelState(),
+        "paddle_detector": models_status.ModelState(),
+        "surya_detector": models_status.ModelState(),
     }
+    models_status._state = dict(state)
     yield
-    models_status._state = {
-        "paddle": models_status.ModelState(),
-        "surya": models_status.ModelState(),
-    }
+    models_status._state = dict(state)
 
 
 def test_check_tesseract_missing_binary():
@@ -59,3 +59,16 @@ def test_prepare_failure_sets_error_with_detail():
 def test_prepare_unknown_model_raises():
     with pytest.raises(ValueError):
         models_status.prepare("unknown")
+
+
+def test_prepare_detector_success_sets_ready():
+    with patch("backend.detector._Engines.paddle", return_value=object()):
+        models_status._prepare("paddle_detector")
+    assert models_status._state["paddle_detector"].status == "ready"
+
+
+def test_prepare_detector_failure_sets_error_with_detail():
+    with patch("backend.detector._Engines.surya", side_effect=RuntimeError("boom")):
+        models_status._prepare("surya_detector")
+    assert models_status._state["surya_detector"].status == "error"
+    assert "boom" in models_status._state["surya_detector"].detail

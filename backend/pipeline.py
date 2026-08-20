@@ -10,7 +10,7 @@ from PIL import Image
 from backend import pdf_extract
 from backend.config import IMAGE_EXTENSIONS, PDF_EXTENSIONS
 from backend.consensus import vote
-from backend.detector import Detector
+from backend.detector import DEFAULT_DETECTOR_ENGINE, Detector
 from backend.recognizers import (
     DEFAULT_LATIN_MODEL_SIZE,
     recognize_paddle,
@@ -175,6 +175,7 @@ def run(
     lang: str = "ru",
     latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE,
     extract_pdf_text_layer: bool = True,
+    detector_engine: str = DEFAULT_DETECTOR_ENGINE,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов (изображения + PDF): детекция ->
     распознавание x3 -> голосование; для PDF с текстовым слоем — прямое
@@ -196,7 +197,7 @@ def run(
     def get_detector() -> Detector:
         nonlocal detector
         if detector is None:
-            detector = Detector()
+            detector = Detector(engine=detector_engine, tesseract_lang=tesseract_lang)
         return detector
 
     matched_files = []

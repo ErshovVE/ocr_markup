@@ -30,7 +30,12 @@ class ModelState:
     detail: Optional[str] = None
 
 
-_state: Dict[str, ModelState] = {"paddle": ModelState(), "surya": ModelState()}
+_state: Dict[str, ModelState] = {
+    "paddle": ModelState(),
+    "surya": ModelState(),
+    "paddle_detector": ModelState(),
+    "surya_detector": ModelState(),
+}
 _lock = threading.Lock()
 
 
@@ -71,9 +76,7 @@ def _surya_weights_on_disk() -> bool:
 
 
 def _paddle_weights_on_disk() -> bool:
-    cache_dir = os.environ.get(
-        "PADDLE_PDX_CACHE_HOME", os.path.expanduser("~/.paddlex")
-    )
+    cache_dir = os.environ.get("PADDLE_PDX_CACHE_HOME", os.path.expanduser("~/.paddlex"))
     model_dir = Path(cache_dir) / "official_models" / PADDLE_CYRILLIC_MODEL_NAME
     return model_dir.is_dir() and any(model_dir.iterdir())
 
@@ -93,12 +96,17 @@ def _prepare(name: str):
     with _lock:
         _state[name] = ModelState("checking")
     try:
-        from backend.recognizers import _Engines
+        from backend.detector import _Engines as DetectorEngines
+        from backend.recognizers import _Engines as RecognizerEngines
 
         if name == "paddle":
-            _Engines.paddle_cyrillic()
+            RecognizerEngines.paddle_cyrillic()
         elif name == "surya":
-            _Engines.surya_recognition()
+            RecognizerEngines.surya_recognition()
+        elif name == "paddle_detector":
+            DetectorEngines.paddle()
+        elif name == "surya_detector":
+            DetectorEngines.surya()
         with _lock:
             _state[name] = ModelState("ready")
     except Exception as e:

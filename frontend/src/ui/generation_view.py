@@ -13,6 +13,11 @@ STATUS_LABELS = {
     "not_checked": "⚪ Не проверено",
 }
 ENGINES = (("paddle", "PaddleOCR"), ("surya", "SuryaOCR"), ("tesseract", "Tesseract"))
+DETECTOR_STATUS_KEYS = {
+    "paddle": "paddle_detector",
+    "surya": "surya_detector",
+    "tesseract": "tesseract",
+}
 
 
 def render_generation_mode():
@@ -21,6 +26,29 @@ def render_generation_mode():
     _render_model_status()
     st.divider()
     _render_run_controls()
+
+
+def _render_engine_status_row(label, status_key, downloadable, key_prefix):
+    info = st.session_state.models_status_cache.get(status_key, {})
+    status = info.get("status", "not_checked")
+    col1, col2, col3 = st.columns([2, 2, 1])
+    col1.write(label)
+    col2.write(STATUS_LABELS.get(status, status))
+    if downloadable and status not in ("ready", "checking"):
+        if col3.button("Скачать", key=f"prepare_{key_prefix}_{status_key}"):
+            try:
+                resp = requests.post(
+                    f"{BACKEND_URL}/models/prepare",
+                    json={"model": status_key},
+                    timeout=5,
+                )
+                resp.raise_for_status()
+                st.session_state.pop("models_status_cache", None)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка запуска подготовки: {e}")
+    if info.get("detail"):
+        st.caption(info["detail"])
 
 
 def _render_model_status():
@@ -37,32 +65,24 @@ def _render_model_status():
             st.error(f"Backend недоступен: {e}")
             return
 
+    st.markdown("**Модели распознавания**")
     for name, label in ENGINES:
-        info = st.session_state.models_status_cache.get(name, {})
-        status = info.get("status", "not_checked")
-        col1, col2, col3 = st.columns([2, 2, 1])
-        col1.write(label)
-        col2.write(STATUS_LABELS.get(status, status))
-        if name != "tesseract" and status not in ("ready", "checking"):
-            if col3.button("Скачать", key=f"prepare_{name}"):
-                try:
-                    resp = requests.post(
-                        f"{BACKEND_URL}/models/prepare",
-                        json={"model": name},
-                        timeout=5,
-                    )
-                    resp.raise_for_status()
-                    st.session_state.pop("models_status_cache", None)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Ошибка запуска подготовки: {e}")
-        if info.get("detail"):
-            st.caption(info["detail"])
+        _render_engine_status_row(label, name, name != "tesseract", "rec")
+
+    st.markdown("**Модели детекции строк**")
+    for name, label in ENGINES:
+        status_key = DETECTOR_STATUS_KEYS[name]
+        _render_engine_status_row(label, status_key, status_key != "tesseract", "det")
 
 
 def _render_run_controls():
     input_dir = st.text_input("Папка с документами", key="consensus_input")
     output_dir = st.text_input("Папка вывода", key="consensus_output")
+    detector_engine = st.selectbox(
+        "Детектор строк текста",
+        ["paddle", "surya", "tesseract"],
+        key="consensus_detector",
+    )
     preferred = st.selectbox(
         "Предпочитаемая модель (при разногласии)",
         [None, "paddle", "surya", "tesseract"],
@@ -85,6 +105,7 @@ def _render_run_controls():
                     "score_threshold": threshold,
                     "preferred_model": preferred,
                     "extract_pdf_text_layer": extract_pdf_text_layer,
+                    "detector_engine": detector_engine,
                 },
                 timeout=5,
             )
