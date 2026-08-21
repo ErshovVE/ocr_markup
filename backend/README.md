@@ -79,13 +79,24 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 он считается пустым, а не блокирует весь job. Таймаут не убивает поток
 движка — он просто перестаёт ждать; сам вызов может доработать в фоне.
 
+## Именование кропов (`crops/`)
+
+Кропы именуются по схеме предшественника этого пайплайна (`predict.py::save_image`),
+а не непрозрачным `uuid4`: `crops/{N // CROPS_PER_FOLDER}/image_{N:05d}.webp`,
+где `N` — сквозной номер кропа и `CROPS_PER_FOLDER = 10000` (`backend/config.py`) —
+то есть не больше 10000 файлов на подпапку (`crops/0/`, `crops/1/`, ...).
+Нумерация при повторном запуске на тот же `output_dir` продолжается с
+максимума, уже найденного на диске (`backend/pipeline.py::_resume_img_count`),
+а не начинается заново с 1 — иначе повторный запуск затёр бы уже
+сохранённые/импортированные кропы прошлых запусков под теми же именами.
+
 ## Отладочные данные авторазметки (`debug.jsonl`)
 
 Рядом с `good.txt`/`needs_review.txt` в `output_dir` пишется `debug.jsonl` —
 по одной JSON-записи на строку:
 
 ```json
-{"crop": "crops/xxx.webp", "bucket": "good", "engine": "paddle", "diverged": false,
+{"crop": "crops/0/image_00001.webp", "bucket": "good", "engine": "paddle", "diverged": false,
  "engines": {"paddle": {"text": "...", "score": 0.97}, "surya": {"text": "...", "score": 0.93}, "tesseract": {"text": "...", "score": 0.81}}}
 ```
 

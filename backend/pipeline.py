@@ -1,8 +1,8 @@
 import json
 import os
+import re
 import threading
 import time
-import uuid
 from glob import glob
 from typing import Callable, Dict, Optional, Tuple
 
@@ -11,7 +11,13 @@ import pypdfium2 as pdfium
 from PIL import Image
 
 from backend import pdf_extract
-from backend.config import ENGINE_CALL_TIMEOUT_SECONDS, IMAGE_EXTENSIONS, PDF_EXTENSIONS
+from backend.config import (
+    CROP_FILENAME_DIGITS,
+    CROPS_PER_FOLDER,
+    ENGINE_CALL_TIMEOUT_SECONDS,
+    IMAGE_EXTENSIONS,
+    PDF_EXTENSIONS,
+)
 from backend.consensus import vote
 from backend.detector import DEFAULT_DETECTOR_ENGINE, Detector
 from backend.recognizers import (
@@ -81,20 +87,56 @@ def _run_engines_with_timeout(
     return results
 
 
-def _save_crop(img_crop: np.ndarray, output_dir: str) -> str:
-    """Сохраняет кроп в output_dir/crops с уникальным именем, возвращает имя файла"""
-    crop_dir = os.path.join(output_dir, "crops")
-    os.makedirs(crop_dir, exist_ok=True)
-    crop_name = f"crop_{uuid.uuid4().hex}.webp"
-    Image.fromarray(img_crop).save(os.path.join(crop_dir, crop_name), "WEBP")
-    return crop_name
+_CROP_FILENAME_RE = re.compile(r"^image_(\d+)\.webp$")
+
+
+def _resume_img_count(output_dir: str) -> int:
+    """Продолжает сквозную нумерацию кропов с прошлых запусков на этот
+    output_dir вместо старта с 1 на каждый запуск.
+
+    crops/ не очищается между запусками (см. докстринг run()), а имена по
+    этой схеме (в отличие от прежнего uuid4) не гарантированно уникальны
+    сами по себе — без резюмирования повторный запуск затёр бы уже
+    сохранённые/импортированные кропы прошлых запусков под теми же именами.
+    """
+    crops_dir = os.path.join(output_dir, "crops")
+    max_count = 0
+    if os.path.isdir(crops_dir):
+        with os.scandir(crops_dir) as folders:
+            for folder_entry in folders:
+                if not folder_entry.is_dir():
+                    continue
+                with os.scandir(folder_entry.path) as files:
+                    for file_entry in files:
+                        match = _CROP_FILENAME_RE.match(file_entry.name)
+                        if match:
+                            max_count = max(max_count, int(match.group(1)))
+    return max_count + 1
+
+
+def _crop_paths(img_count: int, output_dir: str) -> Tuple[str, str]:
+    """Путь кропа по схеме predict.py::save_image — CROPS_PER_FOLDER файлов
+    на подпапку (номер подпапки = img_count // CROPS_PER_FOLDER) вместо
+    непрозрачного uuid4. Возвращает (относительный путь для
+    good.txt/needs_review.txt/debug.jsonl, абсолютный путь для сохранения
+    файла на диске)."""
+    folder = str(img_count // CROPS_PER_FOLDER)
+    filename = f"image_{img_count:0{CROP_FILENAME_DIGITS}d}.webp"
+    relative = f"crops/{folder}/{filename}"
+    absolute = os.path.join(output_dir, "crops", folder, filename)
+    return relative, absolute
+
+
+def _save_crop(img_crop: np.ndarray, absolute_path: str) -> None:
+    """Сохраняет кроп по уже выделенному пути (см. allocate_crop_path в run())"""
+    os.makedirs(os.path.dirname(absolute_path), exist_ok=True)
+    Image.fromarray(img_crop).save(absolute_path, "WEBP")
 
 
 def _process_boxes(
     image: Image.Image,
     numpy_image: np.ndarray,
     boxes,
-    output_dir: str,
     threshold: float,
     preferred_model: Optional[str],
     lang: str,
@@ -102,6 +144,7 @@ def _process_boxes(
     tesseract_lang: str,
     source_label: str,
     write_line: Callable[[str, str], None],
+    allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]] = None,
     on_error: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
@@ -126,7 +169,10 @@ def _process_boxes(
     write_debug(record) — если задан, пишет по одной JSON-записи на строку
     с текстами/score всех 3 движков (см. run()) — без этого показать
     разметчику "что видел каждый движок" физически нечем, т.к. vote()
-    оставляет только текст-победитель.
+    оставляет только текст-победитель. allocate_crop_path() — выделяет
+    следующий (относительный, абсолютный) путь кропа по сквозной нумерации
+    (см. run()/_resume_img_count), чтобы разные строки/файлы одного job'а
+    не выбирали один и тот же номер.
     """
     for box in boxes:
         if should_cancel and should_cancel():
@@ -153,14 +199,15 @@ def _process_boxes(
             )
             bucket, text, engine, diverged = vote(results, threshold, preferred_model)
 
-            crop_name = _save_crop(img_crop, output_dir)
-            write_line(bucket, f"crops/{crop_name}\t{text}\n")
+            crop_relative, crop_absolute = allocate_crop_path()
+            _save_crop(img_crop, crop_absolute)
+            write_line(bucket, f"{crop_relative}\t{text}\n")
             if on_line_done:
                 on_line_done(bucket, diverged)
             if write_debug:
                 write_debug(
                     {
-                        "crop": f"crops/{crop_name}",
+                        "crop": crop_relative,
                         "bucket": bucket,
                         "engine": engine,
                         "diverged": diverged,
@@ -180,7 +227,6 @@ def _process_boxes(
 def _process_pdf(
     file_path: str,
     get_detector: Callable[[], Detector],
-    output_dir: str,
     threshold: float,
     preferred_model: Optional[str],
     lang: str,
@@ -188,6 +234,7 @@ def _process_pdf(
     tesseract_lang: str,
     extract_pdf_text_layer: bool,
     write_line: Callable[[str, str], None],
+    allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]] = None,
     on_error: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
@@ -243,8 +290,9 @@ def _process_pdf(
                         img_crop = numpy_image[int(by0) : int(by2), int(bx0) : int(bx2)]
                         if img_crop.shape[0] <= MIN_CROP_PIX or img_crop.shape[1] <= MIN_CROP_PIX:
                             continue
-                        crop_name = _save_crop(img_crop, output_dir)
-                        write_line("good", f"crops/{crop_name}\t{text}\n")
+                        crop_relative, crop_absolute = allocate_crop_path()
+                        _save_crop(img_crop, crop_absolute)
+                        write_line("good", f"{crop_relative}\t{text}\n")
                         if on_line_done:
                             on_line_done("good", False)
                     except Exception as e:
@@ -260,7 +308,6 @@ def _process_pdf(
                     image,
                     numpy_image,
                     boxes,
-                    output_dir,
                     threshold,
                     preferred_model,
                     lang,
@@ -268,6 +315,7 @@ def _process_pdf(
                     tesseract_lang,
                     source_label,
                     write_line,
+                    allocate_crop_path,
                     on_line_done,
                     on_error=on_error,
                     should_cancel=should_cancel,
@@ -300,8 +348,11 @@ def run(
     good.txt/needs_review.txt/debug.jsonl в output_dir.
 
     good.txt/needs_review.txt перезаписываются на каждый запуск (они
-    описывают только результат этого запуска), а файлы в crops/ получают
-    уникальное имя (uuid4) на каждый кроп, поэтому повторный запуск с тем же
+    описывают только результат этого запуска), а кропы в crops/ именуются
+    по схеме predict.py::save_image — crops/{N // CROPS_PER_FOLDER}/
+    image_{N:0{CROP_FILENAME_DIGITS}d}.webp, где N — сквозной номер кропа
+    (см. _resume_img_count/_crop_paths). Нумерация при повторном запуске
+    продолжается с прошлого максимума на диске, а не с 1, поэтому
     output_dir не портит содержимое уже сохранённых/импортированных кропов
     из прошлых запусков. Обе строки пишутся и сбрасываются на диск сразу по
     мере распознавания (а не одним махом в конце) — если задание упадёт на
@@ -347,6 +398,7 @@ def run(
     tesseract_lang = "rus" if lang == "ru" else "eng"
     good_count = 0
     review_count = 0
+    img_count = _resume_img_count(output_dir)
 
     with (
         open(os.path.join(output_dir, "good.txt"), "w", encoding="utf-8") as good_file,
@@ -368,6 +420,12 @@ def run(
             debug_file.write(json.dumps(record, ensure_ascii=False) + "\n")
             debug_file.flush()
 
+        def allocate_crop_path() -> Tuple[str, str]:
+            nonlocal img_count
+            paths = _crop_paths(img_count, output_dir)
+            img_count += 1
+            return paths
+
         for file_path in matched_files:
             if should_cancel and should_cancel():
                 break
@@ -388,7 +446,6 @@ def run(
                 image,
                 numpy_image,
                 boxes,
-                output_dir,
                 threshold,
                 preferred_model,
                 lang,
@@ -396,6 +453,7 @@ def run(
                 tesseract_lang,
                 file_path,
                 write_line,
+                allocate_crop_path,
                 on_line_done,
                 on_error=on_error,
                 should_cancel=should_cancel,
@@ -411,7 +469,6 @@ def run(
                 _process_pdf(
                     file_path,
                     get_detector,
-                    output_dir,
                     threshold,
                     preferred_model,
                     lang,
@@ -419,6 +476,7 @@ def run(
                     tesseract_lang,
                     extract_pdf_text_layer,
                     write_line,
+                    allocate_crop_path,
                     on_line_done,
                     on_error=on_error,
                     should_cancel=should_cancel,
