@@ -14,6 +14,7 @@ def render_image_list(manager: AnnotationManager, filtered_images: List[str]):
         "all": "Все",
         "unmarked": "Неразмеченные",
         "marked": "Размеченные",
+        "diverged": "Спорные",
     }
 
     selected = st.radio(
@@ -50,7 +51,8 @@ def render_image_list(manager: AnnotationManager, filtered_images: List[str]):
         for _i, img_name in enumerate(filtered_images[start:end]):
             record = manager.records[img_name]
             status = "✅" if record.is_marked else "❓"
-            display = f"{status} {img_name}"
+            diverged_marker = "⚠️ " if record.diverged else ""
+            display = f"{status} {diverged_marker}{img_name}"
 
             # Находим глобальный индекс
             global_idx = list(manager.records.keys()).index(img_name)

@@ -50,6 +50,7 @@ def render_manual_mode():
             "all": "Все",
             "unmarked": "Неразмеченные",
             "marked": "Размеченные",
+            "diverged": "Спорные",
         }
         st.radio("Показать:", list(filter_opts.values()), key="empty_filter")
         return

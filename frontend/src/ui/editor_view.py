@@ -159,6 +159,28 @@ def _render_unsaved_banner(manager: AnnotationManager, current_name: str):
                 st.rerun()
 
 
+def _render_engine_details(manager: AnnotationManager, record):
+    """Показывает, что видел каждый движок авторазметки — данные из
+    debug.jsonl (см. AnnotationManager._load_debug_file). Для чисто ручной
+    разметки (без прогона через backend) debug_by_path пуст, и функция
+    просто ничего не рисует."""
+    debug_record = manager.debug_by_path.get(record.relative_path)
+    if not debug_record:
+        return
+
+    label = "🔍 Что видели движки"
+    if record.diverged:
+        label += " · ⚠️ Разошлись"
+
+    with st.expander(label):
+        winner = debug_record.get("engine")
+        for engine_name, engine_result in debug_record.get("engines", {}).items():
+            text = engine_result.get("text", "")
+            score = engine_result.get("score", 0.0)
+            marker = "🏆 " if engine_name == winner else ""
+            st.caption(f"{marker}**{engine_name}** ({score:.2f}): {text or '_пусто_'}")
+
+
 def render_image_editor(manager: AnnotationManager):
     """Отрисовывает редактор изображения"""
     if not manager.records:
@@ -173,12 +195,18 @@ def render_image_editor(manager: AnnotationManager):
     current_name = img_names[st.session_state.current_idx]
     record = manager.records[current_name]
 
-    st.subheader(f"📷 {current_name}")
+    title = f"📷 {current_name}"
+    if record.diverged:
+        title += " ⚠️"
+    st.subheader(title)
 
     # Отображение изображения
     image = load_and_resize_image(record.absolute_path, max_height=80, max_width=1200)
     if image:
         st.image(image)
+
+    # Детали авторазметки (что видел каждый движок), если есть debug.jsonl
+    _render_engine_details(manager, record)
 
     # Модальное окно подтверждения удаления
     if _render_delete_confirm(manager, current_name):

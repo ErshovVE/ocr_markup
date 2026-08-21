@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from PIL import Image
 
 from src.annotations import AnnotationManager, save_as_handwritten
@@ -99,6 +101,77 @@ def test_save_changes_writes_annotation_file_and_status_cache(tmp_path):
     assert manager.modified_records == set()
 
 
+def test_load_from_file_populates_diverged_flag_from_debug_jsonl(tmp_path):
+    _make_image(tmp_path / "crops" / "a.png")
+    _make_image(tmp_path / "crops" / "b.png")
+    (tmp_path / "debug.jsonl").write_text(
+        '{"crop": "crops/a.png", "bucket": "good", "engine": "paddle", '
+        '"diverged": true, "engines": {"paddle": {"text": "x", "score": 0.95}, '
+        '"surya": {"text": "y", "score": 0.93}, "tesseract": {"text": "x", "score": 0.4}}}\n'
+        '{"crop": "crops/b.png", "bucket": "good", "engine": "paddle", "diverged": false, '
+        '"engines": {"paddle": {"text": "z", "score": 0.99}}}\n',
+        encoding="utf-8",
+    )
+    manager = _manager(tmp_path)
+
+    manager.load_from_file("crops/a.png\tx\ncrops/b.png\tz\n")
+
+    assert manager.records["a.png"].diverged is True
+    assert manager.records["b.png"].diverged is False
+    assert manager.debug_by_path["crops/a.png"]["engines"]["surya"]["text"] == "y"
+
+
+def test_load_from_file_without_debug_jsonl_leaves_diverged_false(tmp_path):
+    _make_image(tmp_path / "images" / "a.png")
+    manager = _manager(tmp_path)
+
+    manager.load_from_file("images/a.png\ttext\n")
+
+    assert manager.records["a.png"].diverged is False
+    assert manager.debug_by_path == {}
+
+
+def test_load_from_file_parses_debug_jsonl_only_once_across_multiple_calls(tmp_path, monkeypatch):
+    _make_image(tmp_path / "crops" / "a.png")
+    _make_image(tmp_path / "crops" / "b.png")
+    (tmp_path / "debug.jsonl").write_text(
+        '{"crop": "crops/a.png", "diverged": true, "engines": {}}\n'
+        '{"crop": "crops/b.png", "diverged": true, "engines": {}}\n',
+        encoding="utf-8",
+    )
+    manager = _manager(tmp_path)
+
+    read_calls = []
+    original_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        if self.name == "debug.jsonl":
+            read_calls.append(self)
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    # Имитирует _build_manager_from_output: load_from_file вызывается
+    # дважды на один manager (по разу на good.txt/needs_review.txt).
+    manager.load_from_file("crops/a.png\tx\n")
+    manager.load_from_file("crops/b.png\ty\n")
+
+    assert len(read_calls) == 1
+    assert manager.records["a.png"].diverged is True
+    assert manager.records["b.png"].diverged is True
+
+
+def test_load_from_file_tolerates_malformed_debug_jsonl(tmp_path):
+    _make_image(tmp_path / "images" / "a.png")
+    (tmp_path / "debug.jsonl").write_text("not json at all", encoding="utf-8")
+    manager = _manager(tmp_path)
+
+    ok, _ = manager.load_from_file("images/a.png\ttext\n")
+
+    assert ok is True
+    assert manager.records["a.png"].diverged is False
+
+
 def test_get_image_list_filters_by_marked_status(tmp_path):
     _make_image(tmp_path / "images" / "a.png")
     _make_image(tmp_path / "images" / "b.png")
@@ -109,6 +182,18 @@ def test_get_image_list_filters_by_marked_status(tmp_path):
     assert manager.get_image_list("marked") == ["a.png"]
     assert manager.get_image_list("unmarked") == ["b.png"]
     assert set(manager.get_image_list("all")) == {"a.png", "b.png"}
+
+
+def test_get_image_list_filters_by_diverged_status(tmp_path):
+    _make_image(tmp_path / "crops" / "a.png")
+    _make_image(tmp_path / "crops" / "b.png")
+    (tmp_path / "debug.jsonl").write_text(
+        '{"crop": "crops/a.png", "diverged": true, "engines": {}}\n', encoding="utf-8"
+    )
+    manager = _manager(tmp_path)
+    manager.load_from_file("crops/a.png\tx\ncrops/b.png\ty\n")
+
+    assert manager.get_image_list("diverged") == ["a.png"]
 
 
 def test_save_as_handwritten_copies_image_and_appends_entry(tmp_path):

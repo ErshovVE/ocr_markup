@@ -1,14 +1,49 @@
 import os
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from backend import models_status
+from backend import jobs, models_status
 from backend.config import DEFAULT_SCORE_THRESHOLD
 from backend.detector import DEFAULT_DETECTOR_ENGINE, DETECTOR_ENGINES
-from backend.jobs import get_active_job_id, get_job, start_job
+from backend.jobs import cancel_job, get_active_job_id, get_job, get_status_snapshot, start_job
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE, LATIN_MODEL_SIZES
+
+# Ключ детектора в models_status.get_status() для каждого detector_engine.
+# "tesseract" не включён отдельно — он уже проверяется как движок
+# распознавания (общий бинарник на детекцию и распознавание, см.
+# backend/README.md), дублировать предупреждение незачем.
+_DETECTOR_STATUS_KEYS = {"paddle": "paddle_detector", "surya": "surya_detector"}
+
+
+def _readiness_warnings(req: "RunRequest") -> List[str]:
+    """Предупреждения о неготовых моделях перед стартом job'а — раньше /run
+    просто стартовал вслепую, и первая же строка могла "молча" зависнуть на
+    скачивании гигабайтных весов без единого объяснения в UI."""
+    status = models_status.get_status()
+    warnings: List[str] = []
+
+    def check(key: str, label: str) -> None:
+        state = status.get(key)
+        if state is None:
+            return
+        if state.status == "error":
+            warnings.append(f"{label}: ошибка — {state.detail or 'см. /models/status'}")
+        elif state.status in ("not_checked", "checking"):
+            warnings.append(
+                f"{label}: не готов ({state.status}) — первый запуск может начаться "
+                "с загрузки модели"
+            )
+
+    if req.lang == "ru":
+        check("paddle", "PaddleOCR (распознавание)")
+    check("surya", "SuryaOCR (распознавание)")
+    check("tesseract", "Tesseract")
+    det_key = _DETECTOR_STATUS_KEYS.get(req.detector_engine)
+    if det_key:
+        check(det_key, "Детектор строк")
+    return warnings
 
 # Локальный однопользовательский сервис без аутентификации (см. backend/README.md) —
 # входные пути не ограничены заранее известным корнем намеренно, так как
@@ -70,7 +105,7 @@ def run(req: RunRequest):
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
-    return {"job_id": job_id}
+    return {"job_id": job_id, "warnings": _readiness_warnings(req)}
 
 
 @app.get("/jobs/active")
@@ -86,15 +121,32 @@ def status(job_id: str):
     job = get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    return {
-        "status": job.status,
-        "error": job.error,
-        "docs_found": job.docs_found,
-        "docs_processed": job.docs_processed,
-        "good_count": job.good_count,
-        "review_count": job.review_count,
-        "diverged_count": job.diverged_count,
-    }
+    return jobs.status_dict(job)
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job_endpoint(job_id: str):
+    """Просит задание остановиться на ближайшей проверке — см. cancel_job()
+    в backend/jobs.py. Не мгновенно: status станет "cancelled" в /status,
+    когда pipeline.run() дойдёт до следующей проверки should_cancel()."""
+    try:
+        cancel_job(job_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e
+    return {"status": "cancelling"}
+
+
+@app.get("/jobs/status_snapshot")
+def job_status_snapshot(output_dir: str):
+    """Статус последнего задания для output_dir, переживший рестарт
+    backend'а (в отличие от /status/{job_id} — job_id теряется вместе с
+    памятью процесса, см. докстринг backend/jobs.py)."""
+    snapshot = get_status_snapshot(output_dir)
+    if snapshot is None:
+        raise HTTPException(404, "Снэпшот не найден для этой output_dir")
+    return snapshot
 
 
 @app.get("/result/{job_id}")

@@ -56,15 +56,47 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract"}` → `{"job_id": str}`; 409, если уже выполняется другое задание (одновременно поддерживается только одно, см. backend/jobs.py)
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract"}` → `{"job_id": str, "warnings": [str]}`; 409, если уже выполняется другое задание (одновременно поддерживается только одно, см. backend/jobs.py). `warnings` — движки, чья модель ещё не готова (`not_checked`/`checking`/`error` в `/models/status`) — задание всё равно стартует, предупреждение просто объясняет, почему первые строки могут "зависнуть" на скачивании весов
 - `GET /jobs/active` → `{"job_id": str | null}` — id текущего выполняющегося задания (или null); нужен фронтенду, чтобы восстановить трекер прогресса после перезагрузки страницы
-- `GET /status/{job_id}` → `{"status": "running" | "done" | "error", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int}` — трекер прогресса обновляется построчно по ходу выполнения задания (см. backend/jobs.py), а не только по завершении файла целиком (распознавание одной строки Surya может занимать до ~20с); `diverged_count` — строки, где 2+ движка независимо уверены (score >= threshold), но разошлись в тексте (см. backend/consensus.py)
+- `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — трекер прогресса обновляется построчно по ходу выполнения задания (см. backend/jobs.py), а не только по завершении файла целиком (распознавание одной строки Surya может занимать до ~20с); `diverged_count` — строки, где 2+ движка независимо уверены (score >= threshold), но разошлись в тексте (см. backend/consensus.py); `error_count`/`errors` — файлы/строки, упавшие с исключением или таймаутом движка (см. `ENGINE_CALL_TIMEOUT_SECONDS` ниже) — `error_count` растёт без ограничения, `errors` хранит только последние `MAX_STORED_ERRORS` (по умолчанию 50) сообщений
+- `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — неизвестный `job_id`, 409 — задание уже не выполняется. Отмена кооперативная: поток нельзя убить напрямую, поэтому задание останавливается на ближайшей проверке между файлами/страницами/строками, не теряя уже записанное; после остановки `/status` покажет `"status": "cancelled"`
+- `GET /jobs/status_snapshot?output_dir=...` → тот же формат, что и `/status/{job_id}`, но по `output_dir`, а не по `job_id` — читает `output_dir/_job_status.json` (пишется на каждый обработанный файл и по завершении, см. backend/jobs.py). Нужен, чтобы понять, чем закончилось задание, после перезапуска backend'а — `_jobs`/`job_id` в памяти к этому моменту уже потеряны, а сам снэпшот на диске переживает рестарт. 404, если снэпшота для этой `output_dir` ещё нет
 - `GET /result/{job_id}` → `{"output_dir": str, "good_count": int, "needs_review_count": int}`
 - `GET /models/status` → `{"paddle": {...}, "surya": {...}, "paddle_detector": {...}, "surya_detector": {...}, "tesseract": {...}}`, каждое значение — `{"status": "not_checked"|"checking"|"ready"|"error", "detail": str|null}`. `paddle`/`surya` — модели распознавания; `paddle_detector`/`surya_detector` — отдельные, независимо скачиваемые модели детекции строк для тех же движков; `tesseract` — общий (детекция и распознавание используют один и тот же системный бинарник)
 - `POST /models/prepare` — `{"model": "paddle"|"surya"|"paddle_detector"|"surya_detector"}` → `{"status": "started"}` (асинхронно инстанцирует движок в фоновом потоке, что триггерит скачивание/кэширование моделей; Tesseract сюда не передаётся — ставится вручную, см. раздел «Установка»)
 
-Состояние задач хранится в памяти процесса — перезапуск backend'а теряет
-историю запущенных задач (см. `backend/jobs.py`).
+Состояние задач (счётчики/статус в памяти, `_jobs`/`job_id`) не переживает
+перезапуск backend'а — см. `backend/jobs.py`. Сами результаты не теряются:
+`good.txt`/`needs_review.txt`/`debug.jsonl` пишутся на диск построчно с
+`flush()` по ходу выполнения, а не одним махом в конце, и статус
+дополнительно дублируется в `output_dir/_job_status.json` на каждый
+обработанный файл — см. `GET /jobs/status_snapshot` выше.
+
+Один вызов recognize_* (paddle/surya/tesseract на одну строку) ограничен
+`ENGINE_CALL_TIMEOUT_SECONDS` (по умолчанию 30с, `backend/config.py`) — если
+движок завис (не просто медленный — recognize_* сами ловят исключения и
+возвращают пустой результат, см. `backend/recognizers.py`), для этой строки
+он считается пустым, а не блокирует весь job. Таймаут не убивает поток
+движка — он просто перестаёт ждать; сам вызов может доработать в фоне.
+
+## Отладочные данные авторазметки (`debug.jsonl`)
+
+Рядом с `good.txt`/`needs_review.txt` в `output_dir` пишется `debug.jsonl` —
+по одной JSON-записи на строку:
+
+```json
+{"crop": "crops/xxx.webp", "bucket": "good", "engine": "paddle", "diverged": false,
+ "engines": {"paddle": {"text": "...", "score": 0.97}, "surya": {"text": "...", "score": 0.93}, "tesseract": {"text": "...", "score": 0.81}}}
+```
+
+Без этого файла победивший текст в `good.txt`/`needs_review.txt` — это всё,
+что остаётся от голосования (`backend/consensus.py::vote`); ни имя
+победившего движка, ни варианты проигравших нигде больше не сохраняются.
+Фронтенд использует `debug.jsonl` для показа деталей разметчику (см.
+`frontend/src/annotations.py::AnnotationManager._load_debug_file`) — если
+файла нет (например, при чисто ручной разметке), это не ошибка, просто
+детали показывать нечем. PDF-страницы с извлечённым текстовым слоем (без
+OCR) в `debug.jsonl` не попадают — там `vote()` не вызывается.
 
 ## PDF
 

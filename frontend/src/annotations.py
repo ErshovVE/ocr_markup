@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 from pathlib import Path
@@ -7,6 +8,8 @@ import streamlit as st
 
 from src.backup import BackupManager
 from src.models import ImageRecord
+
+DEBUG_FILENAME = "debug.jsonl"
 
 
 class AnnotationManager:
@@ -19,6 +22,16 @@ class AnnotationManager:
         self.modified_records: Set[str] = set()
         self.cache_path: Optional[Path] = None
         self.backup_manager = BackupManager(self.base_dir)
+        # relative_path (как в rec.txt, "crops/xxx.webp") -> запись
+        # debug.jsonl ({"bucket", "engine", "diverged", "engines": {...}}).
+        # Пусто, если рядом с рабочей директорией нет debug.jsonl (например,
+        # при чисто ручной разметке без авторазметки) — см. _load_debug_file.
+        self.debug_by_path: Dict[str, dict] = {}
+        # load_from_file может быть вызван несколько раз на один manager
+        # (см. generation_view.py::_build_manager_from_output — по разу на
+        # good.txt/needs_review.txt) — файл должен читаться и парситься
+        # только один раз, а не при каждом вызове.
+        self._debug_file_loaded = False
 
     def load_from_file(self, file_contents: str) -> Tuple[bool, str]:
         """Загружает данные из файла"""
@@ -54,10 +67,46 @@ class AnnotationManager:
 
             # Загружаем статусы из кэша
             self._load_status_cache()
+            self._load_debug_file()
             return True, ""
 
         except Exception as e:
             return False, f"Ошибка загрузки: {e}"
+
+    def _load_debug_file(self):
+        """Загружает debug.jsonl (детали авторазметки — тексты/score всех
+        3 движков на строку), если он есть рядом с рабочей директорией — см.
+        backend/pipeline.py::run(). Лучшее-из-возможного: отсутствие или
+        повреждённость файла не должны мешать обычной разметке, поэтому
+        любая ошибка просто оставляет debug_by_path пустым.
+
+        Чтение и парсинг файла происходит не более одного раза за жизнь
+        manager'а (см. _debug_file_loaded в __init__), а вот простановка
+        diverged повторяется при каждом вызове — load_from_file может
+        добавлять новые records по частям (см. _build_manager_from_output),
+        и им тоже нужно подхватить уже загруженный debug_by_path.
+        """
+        if not self._debug_file_loaded:
+            self._debug_file_loaded = True
+            debug_path = self.base_dir / DEBUG_FILENAME
+            if debug_path.exists():
+                try:
+                    for line in debug_path.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        record = json.loads(line)
+                        crop_path = record.get("crop")
+                        if not crop_path:
+                            continue
+                        self.debug_by_path[crop_path] = record
+                except Exception:
+                    pass
+
+        for image_record in self.records.values():
+            debug_record = self.debug_by_path.get(image_record.relative_path)
+            if debug_record:
+                image_record.diverged = bool(debug_record.get("diverged", False))
 
     def _load_status_cache(self):
         """Загружает кэш статусов"""
@@ -157,6 +206,8 @@ class AnnotationManager:
             return [name for name, rec in self.records.items() if not rec.is_marked]
         elif filter_type == "marked":
             return [name for name, rec in self.records.items() if rec.is_marked]
+        elif filter_type == "diverged":
+            return [name for name, rec in self.records.items() if rec.diverged]
         else:
             return list(self.records.keys())
 

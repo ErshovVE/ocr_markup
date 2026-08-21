@@ -1,20 +1,30 @@
 """Хранилище задач в памяти процесса.
 
-Никакой персистентности: при перезапуске backend'а состояние всех задач
-теряется. Это осознанное упрощение для одноразового спайка с одним
-одновременным заданием на одной машине, а не недоработка.
+Состояние задач (счётчики/статус) не переживает перезапуск backend'а — это
+осознанное упрощение для одноразового спайка с одним одновременным заданием
+на одной машине. Сами результаты (good.txt/needs_review.txt/debug.jsonl) не
+теряются, так как пишутся на диск построчно (см. backend/pipeline.py); чтобы
+после рестарта можно было понять, чем закончилось прошлое задание, статус
+дополнительно дублируется на диск снэпшотом (см. _write_snapshot) —
+GET /jobs/status_snapshot читает его по output_dir, а не по job_id.
 """
 
+import json
+import os
 import threading
 import uuid
-from dataclasses import dataclass
-from typing import Dict, Literal, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Literal, Optional
 
 from backend import pipeline
 from backend.detector import DEFAULT_DETECTOR_ENGINE
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE
 
-JobStatus = Literal["running", "done", "error"]
+JobStatus = Literal["running", "done", "error", "cancelled"]
+SNAPSHOT_FILENAME = "_job_status.json"
+# Сколько последних сообщений об ошибках/таймаутах хранить целиком — сам
+# error_count при этом растёт без ограничения, обрезается только список.
+MAX_STORED_ERRORS = 50
 
 
 @dataclass
@@ -33,6 +43,55 @@ class JobState:
     good_count: int = 0
     review_count: int = 0
     diverged_count: int = 0
+    # Ошибки/таймауты отдельных файлов/строк (см. on_error в
+    # backend/pipeline.py) — раньше уходили только в print(), т.е. были
+    # невидимы в UI: пользователь видел просто меньшую итоговую цифру без
+    # объяснения. error_count считает все случаи, errors хранит последние
+    # MAX_STORED_ERRORS сообщений (не безгранично, чтобы не раздувать память
+    # на большой папке с систематической проблемой).
+    error_count: int = 0
+    errors: List[str] = field(default_factory=list)
+    # Кооперативная отмена — поток нельзя убить напрямую, поэтому
+    # pipeline.run() сам проверяет этот флаг между файлами/страницами/
+    # строками (см. should_cancel в backend/pipeline.py).
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
+def _snapshot_path(output_dir: str) -> str:
+    return os.path.join(output_dir, SNAPSHOT_FILENAME)
+
+
+def _write_snapshot(output_dir: str, state: JobState) -> None:
+    """Лучшее-из-возможного дублирование статуса на диск — если это упадёт
+    (например, output_dir не существует ещё на самом первом чекпоинте), job
+    не должен из-за этого прерываться."""
+    try:
+        with open(_snapshot_path(output_dir), "w", encoding="utf-8") as f:
+            json.dump(status_dict(state), f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def status_dict(state: JobState) -> dict:
+    """Общая форма для GET /status/{job_id} и снэпшота на диске.
+
+    errors копируется (не отдаётся напрямую) — state.errors мутируется
+    (append/pop(0)) из фонового потока job'а в on_error (см. _run_job), а
+    этот словарь может параллельно сериализоваться в HTTP-потоке FastAPI
+    (/status) или при записи снэпшота. list(...) делает каждый вызов
+    консистентным снимком вместо общей изменяемой ссылки.
+    """
+    return {
+        "status": state.status,
+        "error": state.error,
+        "docs_found": state.docs_found,
+        "docs_processed": state.docs_processed,
+        "good_count": state.good_count,
+        "review_count": state.review_count,
+        "diverged_count": state.diverged_count,
+        "error_count": state.error_count,
+        "errors": list(state.errors),
+    }
 
 
 _jobs: Dict[str, JobState] = {}
@@ -62,6 +121,7 @@ def _run_job(
 
     def on_file_done() -> None:
         state.docs_processed += 1
+        _write_snapshot(output_dir, state)
 
     def on_line_done(bucket: str, diverged: bool) -> None:
         if bucket == "good":
@@ -70,6 +130,15 @@ def _run_job(
             state.review_count += 1
         if diverged:
             state.diverged_count += 1
+
+    def on_error(msg: str) -> None:
+        state.error_count += 1
+        state.errors.append(msg)
+        if len(state.errors) > MAX_STORED_ERRORS:
+            state.errors.pop(0)
+
+    def should_cancel() -> bool:
+        return state.cancel_event.is_set()
 
     try:
         good_count, needs_review_count = pipeline.run(
@@ -84,8 +153,10 @@ def _run_job(
             on_found=on_found,
             on_file_done=on_file_done,
             on_line_done=on_line_done,
+            on_error=on_error,
+            should_cancel=should_cancel,
         )
-        state.status = "done"
+        state.status = "cancelled" if state.cancel_event.is_set() else "done"
         state.result = {
             "output_dir": output_dir,
             "good_count": good_count,
@@ -95,6 +166,7 @@ def _run_job(
         state.status = "error"
         state.error = str(e)
     finally:
+        _write_snapshot(output_dir, state)
         _active_job_id = None
 
 
@@ -145,3 +217,30 @@ def get_job(job_id: str) -> Optional[JobState]:
 
 def get_active_job_id() -> Optional[str]:
     return _active_job_id
+
+
+def cancel_job(job_id: str) -> None:
+    """Просит выполняющееся задание остановиться на ближайшей проверке
+    (см. should_cancel в backend/pipeline.py) — не убивает поток напрямую,
+    поэтому уже записанные good.txt/needs_review.txt/debug.jsonl не портятся.
+
+    Поднимает KeyError, если job_id неизвестен, и RuntimeError, если задание
+    уже не выполняется — main.py превращает их в 404/409.
+    """
+    state = _jobs.get(job_id)
+    if state is None:
+        raise KeyError(f"Задание {job_id} не найдено")
+    if state.status != "running":
+        raise RuntimeError(f"Задание {job_id} уже не выполняется (status={state.status})")
+    state.cancel_event.set()
+
+
+def get_status_snapshot(output_dir: str) -> Optional[dict]:
+    """Читает последний записанный на диск снэпшот статуса для output_dir —
+    переживает перезапуск backend'а, в отличие от _jobs (см. докстринг
+    модуля). Возвращает None, если снэпшота нет или он повреждён."""
+    try:
+        with open(_snapshot_path(output_dir), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
