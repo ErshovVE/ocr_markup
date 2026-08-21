@@ -13,8 +13,11 @@ pytest
 pytest --cov=src --cov=backend --cov-report=term-missing
 ```
 
-Тесты покрывают `src/` (модели, бэкапы, аннотации), `backend/consensus.py`
-и `backend/pdf_extract.py`.
+Тесты покрывают `src/` (модели, бэкапы, аннотации), `backend/consensus.py`,
+`backend/pdf_extract.py`, `backend/models_status.py`, а также
+`backend/pipeline.py` (только чистая логика без ML-вызовов — таймаут на
+вызовы движков, схема именования/резюмирования кропов) и `backend/jobs.py`
+(`pipeline.run` подменяется моком — реальные ML-вызовы не выполняются).
 `backend/detector.py` и `backend/recognizers.py` не тестируются — они лениво
 импортируют тяжёлые ML-зависимости (PaddleOCR, SuryaOCR, pytesseract) только
 внутри методов и требуют реальных моделей/системного Tesseract, что не подходит
