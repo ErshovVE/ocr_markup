@@ -5,7 +5,12 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from backend import jobs, models_status
-from backend.config import DEFAULT_SCORE_THRESHOLD
+from backend.config import (
+    DEFAULT_ENGINES,
+    DEFAULT_MIN_AGREE,
+    DEFAULT_SCORE_THRESHOLD,
+    RECOGNITION_ENGINES,
+)
 from backend.detector import DEFAULT_DETECTOR_ENGINE, DETECTOR_ENGINES
 from backend.jobs import cancel_job, get_active_job_id, get_job, get_status_snapshot, start_job
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE, LATIN_MODEL_SIZES
@@ -36,10 +41,12 @@ def _readiness_warnings(req: "RunRequest") -> List[str]:
                 "с загрузки модели"
             )
 
-    if req.lang == "ru":
+    if "paddle" in req.engines and req.lang == "ru":
         check("paddle", "PaddleOCR (распознавание)")
-    check("surya", "SuryaOCR (распознавание)")
-    check("tesseract", "Tesseract")
+    if "surya" in req.engines:
+        check("surya", "SuryaOCR (распознавание)")
+    if "tesseract" in req.engines:
+        check("tesseract", "Tesseract")
     det_key = _DETECTOR_STATUS_KEYS.get(req.detector_engine)
     if det_key:
         check(det_key, "Детектор строк")
@@ -68,6 +75,14 @@ class RunRequest(BaseModel):
     # Движок детекции строк текста — независим от preferred_model
     # (который влияет только на голосование распознавания).
     detector_engine: str = DEFAULT_DETECTOR_ENGINE
+    # Какие движки распознавания вообще прогонять на строку — раньше всегда
+    # были прошиты все 3. engines/min_agree вместе задают схему "N из M" из
+    # фронтенда (1 из 1 / 1 из 2 / 2 из 2 / 2 из 3, см.
+    # frontend/src/ui/generation_view.py): min_agree — сколько из engines
+    # должны сойтись в одном тексте, чтобы принять его без разбора (см.
+    # backend/consensus.py::vote).
+    engines: List[str] = list(DEFAULT_ENGINES)
+    min_agree: int = DEFAULT_MIN_AGREE
 
 
 class PrepareRequest(BaseModel):
@@ -91,6 +106,16 @@ def run(req: RunRequest):
             400,
             f"detector_engine должен быть одним из {DETECTOR_ENGINES}: {req.detector_engine}",
         )
+    if not req.engines or any(e not in RECOGNITION_ENGINES for e in req.engines):
+        raise HTTPException(
+            400,
+            f"engines должен быть непустым подмножеством {RECOGNITION_ENGINES}: {req.engines}",
+        )
+    if not (1 <= req.min_agree <= len(req.engines)):
+        raise HTTPException(
+            400,
+            f"min_agree должен быть от 1 до len(engines)={len(req.engines)}: {req.min_agree}",
+        )
 
     try:
         job_id = start_job(
@@ -102,6 +127,8 @@ def run(req: RunRequest):
             req.latin_model_size,
             req.extract_pdf_text_layer,
             req.detector_engine,
+            req.engines,
+            req.min_agree,
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e

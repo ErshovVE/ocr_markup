@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional
 
 from backend import pipeline
+from backend.config import DEFAULT_ENGINES, DEFAULT_MIN_AGREE
 from backend.detector import DEFAULT_DETECTOR_ENGINE
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE
 
@@ -112,6 +113,8 @@ def _run_job(
     latin_model_size: str,
     extract_pdf_text_layer: bool,
     detector_engine: str,
+    engines: List[str] = DEFAULT_ENGINES,
+    min_agree: int = DEFAULT_MIN_AGREE,
 ):
     global _active_job_id
     state = _jobs[job_id]
@@ -150,6 +153,8 @@ def _run_job(
             latin_model_size,
             extract_pdf_text_layer,
             detector_engine,
+            engines=engines,
+            min_agree=min_agree,
             on_found=on_found,
             on_file_done=on_file_done,
             on_line_done=on_line_done,
@@ -179,8 +184,13 @@ def start_job(
     latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE,
     extract_pdf_text_layer: bool = True,
     detector_engine: str = DEFAULT_DETECTOR_ENGINE,
+    engines: List[str] = DEFAULT_ENGINES,
+    min_agree: int = DEFAULT_MIN_AGREE,
 ) -> str:
     """Запускает pipeline.run в фоновом потоке и сразу возвращает job_id.
+
+    engines/min_agree — выбранная схема распознавания ("1 из 1"/"1 из 2"/
+    "2 из 2"/"2 из 3", см. RunRequest в backend/main.py).
 
     Поднимает RuntimeError, если уже выполняется другое задание — вызывающий
     код (main.py) должен превращать это в HTTP 409.
@@ -204,6 +214,8 @@ def start_job(
             latin_model_size,
             extract_pdf_text_layer,
             detector_engine,
+            engines,
+            min_agree,
         ),
         daemon=True,
     )

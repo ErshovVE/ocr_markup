@@ -1,6 +1,11 @@
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
 PDF_EXTENSIONS = (".pdf",)
 DEFAULT_SCORE_THRESHOLD = 0.95
+# Движки распознавания, доступные для консенсуса (см. backend/recognizers.py) —
+# по умолчанию используются все 3 с требованием совпадения любых 2 ("2 из 3").
+RECOGNITION_ENGINES = ("paddle", "surya", "tesseract")
+DEFAULT_ENGINES = RECOGNITION_ENGINES
+DEFAULT_MIN_AGREE = 2
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8756
 # Верхняя граница ожидания одного вызова recognize_* (Surya может занимать

@@ -24,6 +24,8 @@ def _fake_pipeline_run(n_files=3, sleep_s=0.0, n_errors=0):
         latin_model_size,
         extract_pdf_text_layer,
         detector_engine,
+        engines=None,
+        min_agree=None,
         on_found=None,
         on_file_done=None,
         on_line_done=None,

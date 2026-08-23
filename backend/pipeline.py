@@ -4,7 +4,7 @@ import re
 import threading
 import time
 from glob import glob
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pypdfium2 as pdfium
@@ -14,6 +14,8 @@ from backend import pdf_extract
 from backend.config import (
     CROP_FILENAME_DIGITS,
     CROPS_PER_FOLDER,
+    DEFAULT_ENGINES,
+    DEFAULT_MIN_AGREE,
     ENGINE_CALL_TIMEOUT_SECONDS,
     IMAGE_EXTENSIONS,
     PDF_EXTENSIONS,
@@ -87,6 +89,31 @@ def _run_engines_with_timeout(
     return results
 
 
+def _build_engine_calls(
+    engines: List[str],
+    img_crop: np.ndarray,
+    image: Image.Image,
+    box,
+    lang: str,
+    latin_model_size: str,
+    tesseract_lang: str,
+) -> Dict[str, Tuple[Callable, tuple]]:
+    """Собирает {имя_движка: (функция, аргументы)} только для выбранных
+    движков (см. RunRequest.engines в backend/main.py) — раньше все 3 движка
+    были прошиты жёстко, из-за чего нельзя было прогнать строку, например,
+    только через Surya."""
+    calls: Dict[str, Tuple[Callable, tuple]] = {}
+    if "paddle" in engines:
+        paddle_fn = recognize_paddle if lang == "ru" else recognize_paddle_latin
+        paddle_args = (img_crop,) if lang == "ru" else (img_crop, latin_model_size)
+        calls["paddle"] = (paddle_fn, paddle_args)
+    if "surya" in engines:
+        calls["surya"] = (recognize_surya, (image, box))
+    if "tesseract" in engines:
+        calls["tesseract"] = (recognize_tesseract, (img_crop, tesseract_lang))
+    return calls
+
+
 _CROP_FILENAME_RE = re.compile(r"^image_(\d+)\.webp$")
 
 
@@ -149,8 +176,21 @@ def _process_boxes(
     on_error: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     write_debug: Optional[Callable[[dict], None]] = None,
+    engines: List[str] = DEFAULT_ENGINES,
+    min_agree: int = DEFAULT_MIN_AGREE,
+    detector_engine: str = "paddle",
 ) -> None:
-    """Прогоняет обнаруженные детектором боксы через консенсус 3 движков.
+    """Прогоняет обнаруженные детектором боксы через консенсус выбранных движков.
+
+    engines/min_agree — выбранная на фронтенде схема ("1 из 1"/"1 из 2"/
+    "2 из 2"/"2 из 3", см. frontend/src/ui/generation_view.py): engines —
+    какие движки распознавания вообще запускать на строку, min_agree —
+    сколько из них должны сойтись в одном тексте для vote() (backend/consensus.py).
+
+    detector_engine — только для эвристики многострочных боксов ниже
+    (детектор Surya иногда объединяет 2-3 строки в один бокс; сама
+    детекция уже отработала к этому моменту, здесь только гейт на то, каким
+    движком она была сделана).
 
     Общая логика для растровых изображений и страниц PDF без текстового слоя
     (см. run()/_process_pdf()). write_line(bucket, line) вызывается сразу
@@ -185,19 +225,30 @@ def _process_boxes(
             if img_crop.shape[0] <= MIN_CROP_PIX or img_crop.shape[1] <= MIN_CROP_PIX:
                 continue
 
-            paddle_fn = recognize_paddle if lang == "ru" else recognize_paddle_latin
-            paddle_args = (img_crop,) if lang == "ru" else (img_crop, latin_model_size)
+            calls = _build_engine_calls(
+                engines, img_crop, image, box, lang, latin_model_size, tesseract_lang
+            )
             results = _run_engines_with_timeout(
-                {
-                    "paddle": (paddle_fn, paddle_args),
-                    "surya": (recognize_surya, (image, box)),
-                    "tesseract": (recognize_tesseract, (img_crop, tesseract_lang)),
-                },
+                calls,
                 ENGINE_CALL_TIMEOUT_SECONDS,
                 source_label,
                 on_error=on_error,
             )
-            bucket, text, engine, diverged = vote(results, threshold, preferred_model)
+
+            if detector_engine == "surya":
+                multiline_engines = [name for name, (t, _) in results.items() if "\n" in t]
+                if multiline_engines:
+                    msg = (
+                        f"Похоже, детектор Surya объединил несколько строк в один бокс "
+                        f"(перевод строки в ответе {', '.join(multiline_engines)}): "
+                        f"{source_label} — строка пропущена"
+                    )
+                    print(msg)
+                    if on_error:
+                        on_error(msg)
+                    continue
+
+            bucket, text, engine, diverged = vote(results, threshold, preferred_model, min_agree)
 
             crop_relative, crop_absolute = allocate_crop_path()
             _save_crop(img_crop, crop_absolute)
@@ -239,6 +290,9 @@ def _process_pdf(
     on_error: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     write_debug: Optional[Callable[[dict], None]] = None,
+    engines: List[str] = DEFAULT_ENGINES,
+    min_agree: int = DEFAULT_MIN_AGREE,
+    detector_engine: str = "paddle",
 ) -> None:
     """Обрабатывает один PDF-файл постранично: либо прямым извлечением
     текстового слоя (без OCR), либо обычным OCR-консенсусом растровых страниц.
@@ -320,6 +374,9 @@ def _process_pdf(
                     on_error=on_error,
                     should_cancel=should_cancel,
                     write_debug=write_debug,
+                    engines=engines,
+                    min_agree=min_agree,
+                    detector_engine=detector_engine,
                 )
     finally:
         pdf_doc.close()
@@ -334,6 +391,8 @@ def run(
     latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE,
     extract_pdf_text_layer: bool = True,
     detector_engine: str = DEFAULT_DETECTOR_ENGINE,
+    engines: List[str] = DEFAULT_ENGINES,
+    min_agree: int = DEFAULT_MIN_AGREE,
     on_found: Optional[Callable[[int], None]] = None,
     on_file_done: Optional[Callable[[], None]] = None,
     on_line_done: Optional[Callable[[str, bool], None]] = None,
@@ -341,8 +400,13 @@ def run(
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов (изображения + PDF): детекция ->
-    распознавание x3 -> голосование; для PDF с текстовым слоем — прямое
-    извлечение текста+координат без OCR (см. extract_pdf_text_layer).
+    распознавание выбранными движками -> голосование; для PDF с текстовым
+    слоем — прямое извлечение текста+координат без OCR (см. extract_pdf_text_layer).
+
+    engines/min_agree — схема выбора движков распознавания ("1 из 1"/
+    "1 из 2"/"2 из 2"/"2 из 3", см. RunRequest в backend/main.py и
+    frontend/src/ui/generation_view.py); по умолчанию — все 3 движка,
+    совпадение любых 2 ("2 из 3", прежнее захардкоженное поведение).
 
     Возвращает (кол-во хороших строк, кол-во строк на проверку) и пишет
     good.txt/needs_review.txt/debug.jsonl в output_dir.
@@ -458,6 +522,9 @@ def run(
                 on_error=on_error,
                 should_cancel=should_cancel,
                 write_debug=write_debug,
+                engines=engines,
+                min_agree=min_agree,
+                detector_engine=detector_engine,
             )
             if on_file_done:
                 on_file_done()
@@ -481,6 +548,9 @@ def run(
                     on_error=on_error,
                     should_cancel=should_cancel,
                     write_debug=write_debug,
+                    engines=engines,
+                    min_agree=min_agree,
+                    detector_engine=detector_engine,
                 )
             except Exception as e:
                 msg = f"Ошибка обработки файла {file_path}: {e}"

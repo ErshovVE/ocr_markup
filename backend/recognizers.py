@@ -90,12 +90,25 @@ def recognize_surya(image, box) -> Tuple[str, float]:
 
 
 def recognize_tesseract(crop, lang: str = "rus") -> Tuple[str, float]:
-    """Распознавание текста через Tesseract"""
+    """Распознавание текста через Tesseract
+
+    crop — уже вырезанная одна строка текста (см. box в
+    backend/pipeline.py::_process_boxes, боксы приходят от отдельного
+    построчного детектора). Дефолтный PSM Тессеракта (3 — авто-разметка
+    целой страницы) на таких маленьких однострочных кропах часто не находит
+    вообще ничего (даже на чистом чётком тексте) — он заново пытается
+    сегментировать кроп на блоки/строки, а сегментировать там уже нечего.
+    "--psm 7" ("считать изображение одной строкой текста") пропускает эту
+    повторную сегментацию и распознаёт напрямую — здесь она уместна именно
+    потому, что кроп уже гарантированно одна строка.
+    """
     try:
         import pytesseract
         from pytesseract import Output
 
-        data = pytesseract.image_to_data(crop, lang=lang, output_type=Output.DICT)
+        data = pytesseract.image_to_data(
+            crop, lang=lang, config="--psm 7", output_type=Output.DICT
+        )
         words = [
             (w, c)
             for w, c in zip(data["text"], data["conf"], strict=False)

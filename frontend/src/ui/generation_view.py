@@ -20,11 +20,50 @@ JOB_STATUS_LABELS = {
     "cancelled": "⏹ Отменено",
 }
 ENGINES = (("paddle", "PaddleOCR"), ("surya", "SuryaOCR"), ("tesseract", "Tesseract"))
+ENGINE_LABELS = dict(ENGINES)
+ENGINE_KEYS = tuple(k for k, _ in ENGINES)
 DETECTOR_STATUS_KEYS = {
     "paddle": "paddle_detector",
     "surya": "surya_detector",
     "tesseract": "tesseract",
 }
+# Схема сверки движков распознавания: сколько движков вообще прогонять на
+# строку (engines_count) и сколько из них должны сойтись в одном тексте,
+# чтобы принять его без ручной проверки (min_agree, см. backend/consensus.py
+# vote()/backend/main.py RunRequest.min_agree). Раньше здесь не было выбора —
+# всегда прогонялись все 3 движка с требованием совпадения любых двух
+# ("2 из 3" ниже) вне зависимости от того, что реально нужно разметчику.
+CONSENSUS_SCHEMES = {
+    "1_of_1": {
+        "label": "1 из 1 — один движок",
+        "engines_count": 1,
+        "min_agree": 1,
+        "help": "Прогоняется один выбранный движок. Без сверки — самый быстрый вариант, "
+        "но никто не подстрахует, если движок ошибётся.",
+    },
+    "1_of_2": {
+        "label": "1 из 2 — любой из двух уверен",
+        "engines_count": 2,
+        "min_agree": 1,
+        "help": "Прогоняются два движка; строка засчитывается «хорошей», как только "
+        "хотя бы один из них уверен в своём ответе — сверять тексты друг с другом не нужно.",
+    },
+    "2_of_2": {
+        "label": "2 из 2 — оба должны совпасть",
+        "engines_count": 2,
+        "min_agree": 2,
+        "help": "Прогоняются два движка; строка засчитывается «хорошей», только если оба "
+        "независимо распознали одинаковый текст.",
+    },
+    "2_of_3": {
+        "label": "2 из 3 — совпадение любых двух (по умолчанию)",
+        "engines_count": 3,
+        "min_agree": 2,
+        "help": "Прогоняются все три движка; достаточно, чтобы любые два сошлись в тексте. "
+        "Прежнее поведение — самая надёжная, но и самая медленная схема.",
+    },
+}
+DEFAULT_CONSENSUS_SCHEME = "2_of_3"
 
 
 def render_generation_mode():
@@ -152,18 +191,55 @@ def _render_run_controls():
         "Папка вывода", key="consensus_output", placeholder="Например: /data/Датасет_результат"
     )
 
-    col_det, col_pref, col_thr = st.columns(3)
+    col_det, col_thr = st.columns(2)
     detector_engine = col_det.selectbox(
         "Детектор строк текста",
         ["paddle", "surya", "tesseract"],
         key="consensus_detector",
     )
-    preferred = col_pref.selectbox(
-        "Предпочитаемая модель (при разногласии)",
-        [None, "paddle", "surya", "tesseract"],
-        key="consensus_preferred",
-    )
     threshold = col_thr.slider("Порог уверенности", 0.0, 1.0, 0.95, key="consensus_threshold")
+
+    scheme_key = st.selectbox(
+        "Схема сверки движков распознавания",
+        list(CONSENSUS_SCHEMES.keys()),
+        index=list(CONSENSUS_SCHEMES.keys()).index(DEFAULT_CONSENSUS_SCHEME),
+        format_func=lambda k: CONSENSUS_SCHEMES[k]["label"],
+        key="consensus_scheme",
+    )
+    scheme = CONSENSUS_SCHEMES[scheme_key]
+    st.caption(scheme["help"])
+    engines_count = scheme["engines_count"]
+    min_agree = scheme["min_agree"]
+
+    if engines_count == len(ENGINE_KEYS):
+        engines = list(ENGINE_KEYS)
+        st.caption("Движки: " + ", ".join(ENGINE_LABELS[e] for e in engines))
+    elif engines_count == 1:
+        engines = [
+            st.selectbox(
+                "Движок распознавания",
+                ENGINE_KEYS,
+                format_func=lambda k: ENGINE_LABELS[k],
+                key="consensus_single_engine",
+            )
+        ]
+    else:
+        engines = st.multiselect(
+            f"Движки распознавания (выберите {engines_count})",
+            ENGINE_KEYS,
+            format_func=lambda k: ENGINE_LABELS[k],
+            max_selections=engines_count,
+            key="consensus_multi_engines",
+        )
+
+    preferred = None
+    if len(engines) >= 2:
+        preferred = st.selectbox(
+            "Предпочитаемая модель (тай-брейк при разногласии)",
+            [None, *engines],
+            format_func=lambda k: "—" if k is None else ENGINE_LABELS[k],
+            key="consensus_preferred",
+        )
 
     extract_pdf_text_layer = st.checkbox(
         "Извлекать текст из PDF напрямую, без OCR (если есть текстовый слой)",
@@ -172,29 +248,34 @@ def _render_run_controls():
     )
 
     if st.button("▶ Запустить", key="consensus_run"):
-        try:
-            resp = requests.post(
-                f"{BACKEND_URL}/run",
-                json={
-                    "input_dir": input_dir,
-                    "output_dir": output_dir,
-                    "score_threshold": threshold,
-                    "preferred_model": preferred,
-                    "extract_pdf_text_layer": extract_pdf_text_layer,
-                    "detector_engine": detector_engine,
-                },
-                timeout=5,
-            )
-            resp.raise_for_status()
-            run_data = resp.json()
-            st.session_state.consensus_job_id = run_data["job_id"]
-            st.session_state.pop("consensus_status_data", None)
-            st.session_state.pop("consensus_snapshot", None)
-            st.success("Запущено")
-            for warning in run_data.get("warnings", []):
-                st.warning(warning)
-        except Exception as e:
-            st.error(f"Ошибка запуска: {_format_backend_error(e)}")
+        if len(engines) != engines_count:
+            st.error(f"Выберите ровно {engines_count} движков распознавания для этой схемы")
+        else:
+            try:
+                resp = requests.post(
+                    f"{BACKEND_URL}/run",
+                    json={
+                        "input_dir": input_dir,
+                        "output_dir": output_dir,
+                        "score_threshold": threshold,
+                        "preferred_model": preferred,
+                        "extract_pdf_text_layer": extract_pdf_text_layer,
+                        "detector_engine": detector_engine,
+                        "engines": engines,
+                        "min_agree": min_agree,
+                    },
+                    timeout=5,
+                )
+                resp.raise_for_status()
+                run_data = resp.json()
+                st.session_state.consensus_job_id = run_data["job_id"]
+                st.session_state.pop("consensus_status_data", None)
+                st.session_state.pop("consensus_snapshot", None)
+                st.success("Запущено")
+                for warning in run_data.get("warnings", []):
+                    st.warning(warning)
+            except Exception as e:
+                st.error(f"Ошибка запуска: {_format_backend_error(e)}")
 
     if st.session_state.get("consensus_job_id"):
         _render_live_tracker()

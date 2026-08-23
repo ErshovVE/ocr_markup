@@ -9,10 +9,28 @@ PaddleOCR/SuryaOCR/TesseractOCR распознаватели). Не включё
 
 Детектор строк текста выбирается независимо от консенсуса распознавания —
 `detector_engine` в `/run` принимает `paddle` (по умолчанию), `surya` или
-`tesseract`. Распознавание всегда прогоняется всеми 3 движками одновременно
-и голосует за итоговый текст — `detector_engine` влияет только на то, какой
-движок находит боксы строк, `preferred_model` остаётся тай-брейком только
-для голосования распознавания.
+`tesseract` и влияет только на то, какой движок находит боксы строк.
+
+Какие движки распознавания прогонять на строку и сколько из них должны
+сойтись в одном тексте, чтобы принять его без ручной проверки, задаётся
+парой полей `engines`/`min_agree` в `/run` — схема "N из M" (см.
+`frontend/src/ui/generation_view.py::CONSENSUS_SCHEMES` для готовых
+пресетов: 1 из 1, 1 из 2, 2 из 2, 2 из 3). По умолчанию — все 3 движка,
+совпадение любых 2 (`engines=["paddle","surya","tesseract"]`,
+`min_agree=2`) — прежнее захардкоженное поведение. При `min_agree <= 1`
+сверка большинства текстов пропускается: побеждает единственный уверенный
+движок (или `preferred_model`/лучший по score, см. `backend/consensus.py::vote`).
+`preferred_model` остаётся тай-брейком только для голосования распознавания
+и должен входить в `engines`.
+
+При `detector_engine="surya"` детектор строк иногда объединяет 2-3 строки
+текста в один бокс вместо одной (причина не выяснена). Признак — перевод
+строки (`\n`) в тексте, который вернул на этот бокс какой-либо из движков
+распознавания. В этом случае строка не попадает ни в `good.txt`, ни в
+`needs_review.txt`, кроп не сохраняется — она просто пропускается, а
+сообщение об этом уходит в `error_count`/`errors` (`GET /status/{job_id}`,
+см. ниже) и в консоль backend'а (см. `backend/pipeline.py::_process_boxes`).
+При других `detector_engine` эта проверка не выполняется.
 
 Распознавание по умолчанию (`lang="ru"`) использует кириллическую модель
 `cyrillic_PP-OCRv5_mobile_rec` — PP-OCRv6 её не заменяет, так как её 50 языков
@@ -56,7 +74,7 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract"}` → `{"job_id": str, "warnings": [str]}`; 409, если уже выполняется другое задание (одновременно поддерживается только одно, см. backend/jobs.py). `warnings` — движки, чья модель ещё не готова (`not_checked`/`checking`/`error` в `/models/status`) — задание всё равно стартует, предупреждение просто объясняет, почему первые строки могут "зависнуть" на скачивании весов
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int}` → `{"job_id": str, "warnings": [str]}`; 400, если `engines` пуст/содержит неизвестный движок или `min_agree` вне `[1, len(engines)]`; 409, если уже выполняется другое задание (одновременно поддерживается только одно, см. backend/jobs.py). `warnings` — движки из `engines` (и детектор), чья модель ещё не готова (`not_checked`/`checking`/`error` в `/models/status`) — задание всё равно стартует, предупреждение просто объясняет, почему первые строки могут "зависнуть" на скачивании весов
 - `GET /jobs/active` → `{"job_id": str | null}` — id текущего выполняющегося задания (или null); нужен фронтенду, чтобы восстановить трекер прогресса после перезагрузки страницы
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — трекер прогресса обновляется построчно по ходу выполнения задания (см. backend/jobs.py), а не только по завершении файла целиком (распознавание одной строки Surya может занимать до ~20с); `diverged_count` — строки, где 2+ движка независимо уверены (score >= threshold), но разошлись в тексте (см. backend/consensus.py); `error_count`/`errors` — файлы/строки, упавшие с исключением или таймаутом движка (см. `ENGINE_CALL_TIMEOUT_SECONDS` ниже) — `error_count` растёт без ограничения, `errors` хранит только последние `MAX_STORED_ERRORS` (по умолчанию 50) сообщений
 - `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — неизвестный `job_id`, 409 — задание уже не выполняется. Отмена кооперативная: поток нельзя убить напрямую, поэтому задание останавливается на ближайшей проверке между файлами/страницами/строками, не теряя уже записанное; после остановки `/status` покажет `"status": "cancelled"`
@@ -100,9 +118,11 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
  "engines": {"paddle": {"text": "...", "score": 0.97}, "surya": {"text": "...", "score": 0.93}, "tesseract": {"text": "...", "score": 0.81}}}
 ```
 
-Без этого файла победивший текст в `good.txt`/`needs_review.txt` — это всё,
-что остаётся от голосования (`backend/consensus.py::vote`); ни имя
-победившего движка, ни варианты проигравших нигде больше не сохраняются.
+`engines` в записи содержит только те движки, что реально были прогнаны на
+эту строку (см. `engines`/`min_agree` в `/run` выше) — не всегда все 3. Без
+этого файла победивший текст в `good.txt`/`needs_review.txt` — это всё, что
+остаётся от голосования (`backend/consensus.py::vote`); ни имя победившего
+движка, ни варианты проигравших нигде больше не сохраняются.
 Фронтенд использует `debug.jsonl` для показа деталей разметчику (см.
 `frontend/src/annotations.py::AnnotationManager._load_debug_file`) — если
 файла нет (например, при чисто ручной разметке), это не ошибка, просто
@@ -123,7 +143,7 @@ OCR) в `debug.jsonl` не попадают — там `vote()` не вызыв�
 - **Нет текстового слоя** (в т.ч. если текст появляется только начиная с
   3-й страницы — проверяются только первые 2) — документ обрабатывается
   постранично как обычное растровое изображение, через тот же
-  3-движковый OCR-консенсус.
+  OCR-консенсус выбранных `engines`/`min_agree`.
 
 **Известное ограничение**: "текстовый слой" не отличается от текста,
 добавленного самим сканером (searchable PDF от сканирующего ПО) — такой слой
