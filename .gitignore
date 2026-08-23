@@ -212,3 +212,4 @@ __marimo__/
 *core/config.py
 images/
 data/*
+.claude/
