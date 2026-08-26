@@ -54,5 +54,6 @@ docker run --rm -p 8756:8756 -v "$(pwd)/data:/data" ocr-markup-backend
   сборка и первый запуск (скачивание ML-моделей) могут занять продолжительное
   время.
 - Frontend-образ не включает `predict.py`/`predict.ipynb` и
-  PyInstaller-обвязку (`frontend/wrapper.py`, `frontend/pyinst_command.txt`) —
-  они не участвуют в запуске приложения (см. `CLAUDE.md`).
+  PyInstaller-обвязку (`frontend/wrapper.py`, `frontend/pyinst_command.txt`,
+  `frontend/build_exe.py`, `frontend/requirements-build.txt`) — они не
+  участвуют в запуске приложения (см. `CLAUDE.md`).

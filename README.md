@@ -9,14 +9,14 @@
 </p>
 
 <p align="center">
-  <b><a href="#english">🇬🇧 English</a></b> &nbsp;•&nbsp; <b><a href="#русский">🇷🇺 Русский</a></b>
+  <b><a href="#english">en English</a></b> &nbsp;•&nbsp; <b><a href="#русский">🇷🇺 Русский</a></b>
 </p>
 
 ---
 
 <a id="english"></a>
 
-## 🇬🇧 English
+## en English
 
 A two-service Python toolkit for building OCR training data: a **Streamlit** app for manually labeling image→text pairs, and a **FastAPI** backend that auto-labels a batch of documents by running three OCR engines in parallel and voting on the result.
 
@@ -62,7 +62,15 @@ uvicorn backend.main:app --reload
 ```
 The backend additionally needs a system Tesseract install with the `rus`/`eng` language packs (`tesseract --list-langs`). PaddleOCR/SuryaOCR models download automatically on first use.
 
-A standalone Windows `.exe` build of the frontend is also available via PyInstaller — see `frontend/pyinst_command.txt`.
+**Frontend-only (no backend)** — a fully working scenario: manual labeling (list/editor/sidebar, backups, hotkeys) needs no backend at all. Only the auto-labeling (OCR consensus) generation mode requires `backend/` to be running; skip it if you're bringing your own image→text pairs and just want to label them by hand.
+
+A standalone frontend executable can be built via PyInstaller:
+```bash
+cd frontend
+pip install -r requirements-build.txt
+python build_exe.py
+```
+This wraps the raw command documented in `frontend/pyinst_command.txt` (bundles `app.py` via `wrapper.py`; produces a native executable for the host OS, `.exe` on Windows).
 
 ### Project structure
 
@@ -154,7 +162,15 @@ uvicorn backend.main:app --reload
 ```
 Backend'у дополнительно нужен системный Tesseract с языковыми пакетами `rus`/`eng` (`tesseract --list-langs`). Модели PaddleOCR/SuryaOCR скачиваются автоматически при первом использовании.
 
-Также доступна сборка автономного `.exe` фронтенда под Windows через PyInstaller — см. `frontend/pyinst_command.txt`.
+**Только frontend (без backend)** — тоже полностью рабочий сценарий: ручная разметка (список/редактор/сайдбар, бэкапы, хоткеи) не требует backend вообще. Backend нужен только для режима авторазметки (OCR-консенсус) — его можно пропустить, если у вас уже есть свои пары изображение→текст и нужна только ручная разметка.
+
+Автономный исполняемый файл фронтенда собирается через PyInstaller:
+```bash
+cd frontend
+pip install -r requirements-build.txt
+python build_exe.py
+```
+Скрипт оборачивает сырую команду, описанную в `frontend/pyinst_command.txt` (упаковывает `app.py` через `wrapper.py`; на выходе — нативный исполняемый файл под текущую ОС, `.exe` на Windows).
 
 ### Структура репозитория
 
