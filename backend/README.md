@@ -1,48 +1,53 @@
-# OCR Consensus Backend (спайк)
+# OCR Consensus Backend (spike)
 
-Отдельный FastAPI-сервис для 3-движкового консенсуса (PaddleOCR детектор +
-PaddleOCR/SuryaOCR/TesseractOCR распознаватели). Не включён в
-`frontend/requirements.txt` и не участвует в сборке `.exe` — тяжёлые ML-зависимости
-изолированы намеренно.
+<p align="center">
+  <strong>Language:</strong>
+  <b>English</b> |
+  <a href="../docs/ru/backend-README.md">🇷🇺 Русский</a>
+</p>
 
-Детектор строк использует PaddleOCR PP-OCRv6 (детекция не зависит от языка).
+A separate FastAPI service for 3-engine consensus (PaddleOCR detector +
+PaddleOCR/SuryaOCR/TesseractOCR recognizers). Not included in
+`frontend/requirements.txt` and not part of the `.exe` build — the heavy ML
+dependencies are deliberately isolated.
 
-Детектор строк текста выбирается независимо от консенсуса распознавания —
-`detector_engine` в `/run` принимает `paddle` (по умолчанию), `surya` или
-`tesseract` и влияет только на то, какой движок находит боксы строк.
+The line detector uses PaddleOCR PP-OCRv6 (detection is language-independent).
 
-Какие движки распознавания прогонять на строку и сколько из них должны
-сойтись в одном тексте, чтобы принять его без ручной проверки, задаётся
-парой полей `engines`/`min_agree` в `/run` — схема "N из M" (см.
-`frontend/src/ui/generation_view.py::CONSENSUS_SCHEMES` для готовых
-пресетов: 1 из 1, 1 из 2, 2 из 2, 2 из 3). По умолчанию — все 3 движка,
-совпадение любых 2 (`engines=["paddle","surya","tesseract"]`,
-`min_agree=2`) — прежнее захардкоженное поведение. При `min_agree <= 1`
-сверка большинства текстов пропускается: побеждает единственный уверенный
-движок (или `preferred_model`/лучший по score, см. `backend/consensus.py::vote`).
-`preferred_model` остаётся тай-брейком только для голосования распознавания
-и должен входить в `engines`.
+The text-line detector engine is chosen independently from the recognition
+consensus — `detector_engine` in `/run` accepts `paddle` (default), `surya`,
+or `tesseract`, and only affects which engine finds the line boxes.
 
-При `detector_engine="surya"` детектор строк иногда объединяет 2-3 строки
-текста в один бокс вместо одной (причина не выяснена). Признак — перевод
-строки (`\n`) в тексте, который вернул на этот бокс какой-либо из движков
-распознавания. В этом случае строка не попадает ни в `good.txt`, ни в
-`needs_review.txt`, кроп не сохраняется — она просто пропускается, а
-сообщение об этом уходит в `error_count`/`errors` (`GET /status/{job_id}`,
-см. ниже) и в консоль backend'а (см. `backend/pipeline.py::_process_boxes`).
-При других `detector_engine` эта проверка не выполняется.
+Which recognition engines to run on a line, and how many of them must agree
+on the same text to accept it without manual review, is set by the
+`engines`/`min_agree` field pair in `/run` — an "N of M" scheme (see
+`frontend/src/ui/generation_view.py::CONSENSUS_SCHEME_KEYS` for the ready-made
+presets: 1 of 1, 1 of 2, 2 of 2, 2 of 3). Default — all 3 engines, any 2
+agreeing (`engines=["paddle","surya","tesseract"]`, `min_agree=2`) — the
+original hardcoded behavior. When `min_agree <= 1`, cross-checking most texts
+is skipped: the single confident engine wins (or `preferred_model`/best by
+score, see `backend/consensus.py::vote`). `preferred_model` remains a
+tie-break only for the recognition vote and must be included in `engines`.
 
-Распознавание по умолчанию (`lang="ru"`) использует кириллическую модель
-`cyrillic_PP-OCRv5_mobile_rec` — PP-OCRv6 её не заменяет, так как её 50 языков
-это китайский/японский/английский и 46 языков на латинице, кириллица не
-поддерживается. Для документов на латинице можно передать `lang="latin"` в
-`/run` — тогда вместо кириллической модели используется PaddleOCR PP-OCRv6
-(`latin_model_size`: `tiny` | `small` (по умолчанию) | `medium`), а Tesseract
-переключается на `lang="eng"`.
+With `detector_engine="surya"` the line detector sometimes merges 2-3 text
+lines into a single box instead of one (the cause hasn't been tracked down).
+The tell is a newline (`\n`) in the text any recognition engine returned for
+that box. In that case the line doesn't end up in either `good.txt` or
+`needs_review.txt`, the crop isn't saved — it's simply skipped, and a message
+about it goes into `error_count`/`errors` (`GET /status/{job_id}`, see below)
+and into the backend console (see `backend/pipeline.py::_process_boxes`).
+With other `detector_engine` values this check doesn't run.
 
-## Установка
+Recognition by default (`lang="ru"`) uses the Cyrillic model
+`cyrillic_PP-OCRv5_mobile_rec` — PP-OCRv6 doesn't replace it, since its 50
+languages are Chinese/Japanese/English and 46 Latin-script languages, Cyrillic
+isn't supported. For Latin-script documents, pass `lang="latin"` to `/run` —
+then instead of the Cyrillic model, PaddleOCR PP-OCRv6 is used
+(`latin_model_size`: `tiny` | `small` (default) | `medium`), and Tesseract
+switches to `lang="eng"`.
 
-Рекомендуется отдельное виртуальное окружение:
+## Installation
+
+A separate virtual environment is recommended:
 
 ```bash
 python -m venv .venv-backend
@@ -50,103 +55,104 @@ python -m venv .venv-backend
 pip install -r backend/requirements.txt
 ```
 
-Дополнительно требуется системный бинарник Tesseract с русским языковым
-пакетом (не устанавливается через `pip install pytesseract` — это только
-Python-обёртка):
+A system Tesseract binary with the Russian language pack is additionally
+required (not installed via `pip install pytesseract` — that's just the
+Python wrapper):
 
-- Установить `tesseract-ocr` для вашей ОС.
-- Убедиться, что `tesseract --list-langs` включает `rus`.
+- Install `tesseract-ocr` for your OS.
+- Make sure `tesseract --list-langs` includes `rus`.
 
-Модели PaddleOCR и Surya скачиваются и кэшируются автоматически при первом
-использовании — хардкодить локальные пути не нужно.
+PaddleOCR and Surya models are downloaded and cached automatically on first
+use — no need to hardcode local paths.
 
-## Запуск
+## Running
 
 ```bash
 uvicorn backend.main:app --host 127.0.0.1 --port 8756
 ```
 
-Сервис слушает только `127.0.0.1` — без аутентификации и без ограничения на
-принимаемые `input_dir`/`output_dir` (любой путь, доступный процессу, будет
-прочитан/перезаписан). Это осознанный компромисс для локального
-однопользовательского спайка (см. PRD, раздел "Won't Building"); не
-запускать на общей/многопользовательской машине как есть.
+The service only listens on `127.0.0.1` — no authentication and no
+restriction on the accepted `input_dir`/`output_dir` (any path the process
+can reach will be read/overwritten). This is a deliberate trade-off for a
+local, single-user spike (see the PRD, "Won't Building" section); don't run
+it on a shared/multi-user machine as-is.
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int}` → `{"job_id": str, "warnings": [str]}`; 400, если `engines` пуст/содержит неизвестный движок или `min_agree` вне `[1, len(engines)]`; 409, если уже выполняется другое задание (одновременно поддерживается только одно, см. backend/jobs.py). `warnings` — движки из `engines` (и детектор), чья модель ещё не готова (`not_checked`/`checking`/`error` в `/models/status`) — задание всё равно стартует, предупреждение просто объясняет, почему первые строки могут "зависнуть" на скачивании весов
-- `GET /jobs/active` → `{"job_id": str | null}` — id текущего выполняющегося задания (или null); нужен фронтенду, чтобы восстановить трекер прогресса после перезагрузки страницы
-- `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — трекер прогресса обновляется построчно по ходу выполнения задания (см. backend/jobs.py), а не только по завершении файла целиком (распознавание одной строки Surya может занимать до ~20с); `diverged_count` — строки, где 2+ движка независимо уверены (score >= threshold), но разошлись в тексте (см. backend/consensus.py); `error_count`/`errors` — файлы/строки, упавшие с исключением или таймаутом движка (см. `ENGINE_CALL_TIMEOUT_SECONDS` ниже) — `error_count` растёт без ограничения, `errors` хранит только последние `MAX_STORED_ERRORS` (по умолчанию 50) сообщений
-- `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — неизвестный `job_id`, 409 — задание уже не выполняется. Отмена кооперативная: поток нельзя убить напрямую, поэтому задание останавливается на ближайшей проверке между файлами/страницами/строками, не теряя уже записанное; после остановки `/status` покажет `"status": "cancelled"`
-- `GET /jobs/status_snapshot?output_dir=...` → тот же формат, что и `/status/{job_id}`, но по `output_dir`, а не по `job_id` — читает `output_dir/_job_status.json` (пишется на каждый обработанный файл и по завершении, см. backend/jobs.py). Нужен, чтобы понять, чем закончилось задание, после перезапуска backend'а — `_jobs`/`job_id` в памяти к этому моменту уже потеряны, а сам снэпшот на диске переживает рестарт. 404, если снэпшота для этой `output_dir` ещё нет
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int}` → `{"job_id": str, "warnings": [str]}`; 400 if `engines` is empty/contains an unknown engine, or `min_agree` is outside `[1, len(engines)]`; 409 if another job is already running (only one is supported at a time, see backend/jobs.py). `warnings` — engines from `engines` (and the detector) whose model isn't ready yet (`not_checked`/`checking`/`error` in `/models/status`) — the job starts anyway, the warning just explains why the first lines might "hang" downloading weights
+- `GET /jobs/active` → `{"job_id": str | null}` — id of the currently running job (or null); needed by the frontend to restore the progress tracker after a page reload
+- `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — the progress tracker updates line by line as the job runs (see backend/jobs.py), not only when a whole file completes (a single Surya line can take up to ~20s to recognize); `diverged_count` — lines where 2+ engines are independently confident (score >= threshold) but disagreed on the text (see backend/consensus.py); `error_count`/`errors` — files/lines that failed with an exception or an engine timeout (see `ENGINE_CALL_TIMEOUT_SECONDS` below) — `error_count` grows unbounded, `errors` holds only the last `MAX_STORED_ERRORS` (default 50) messages
+- `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — unknown `job_id`, 409 — the job is no longer running. Cancellation is cooperative: the thread can't be killed directly, so the job stops at the nearest check between files/pages/lines, without losing what's already written; once stopped, `/status` will show `"status": "cancelled"`
+- `GET /jobs/status_snapshot?output_dir=...` → the same shape as `/status/{job_id}`, but keyed by `output_dir` instead of `job_id` — reads `output_dir/_job_status.json` (written on every processed file and on completion, see backend/jobs.py). Needed to find out how a job ended after a backend restart — `_jobs`/`job_id` in memory are already lost by then, but the on-disk snapshot survives a restart. 404 if there's no snapshot yet for that `output_dir`
 - `GET /result/{job_id}` → `{"output_dir": str, "good_count": int, "needs_review_count": int}`
-- `GET /models/status` → `{"paddle": {...}, "surya": {...}, "paddle_detector": {...}, "surya_detector": {...}, "tesseract": {...}}`, каждое значение — `{"status": "not_checked"|"checking"|"ready"|"error", "detail": str|null}`. `paddle`/`surya` — модели распознавания; `paddle_detector`/`surya_detector` — отдельные, независимо скачиваемые модели детекции строк для тех же движков; `tesseract` — общий (детекция и распознавание используют один и тот же системный бинарник)
-- `POST /models/prepare` — `{"model": "paddle"|"surya"|"paddle_detector"|"surya_detector"}` → `{"status": "started"}` (асинхронно инстанцирует движок в фоновом потоке, что триггерит скачивание/кэширование моделей; Tesseract сюда не передаётся — ставится вручную, см. раздел «Установка»)
+- `GET /models/status` → `{"paddle": {...}, "surya": {...}, "paddle_detector": {...}, "surya_detector": {...}, "tesseract": {...}}`, each value — `{"status": "not_checked"|"checking"|"ready"|"error", "detail": str|null}`. `paddle`/`surya` — recognition models; `paddle_detector`/`surya_detector` — separate, independently downloaded line-detection models for those same engines; `tesseract` — shared (detection and recognition use the same system binary)
+- `POST /models/prepare` — `{"model": "paddle"|"surya"|"paddle_detector"|"surya_detector"}` → `{"status": "started"}` (asynchronously instantiates the engine in a background thread, which triggers downloading/caching the models; Tesseract isn't accepted here — it's installed manually, see the "Installation" section)
 
-Состояние задач (счётчики/статус в памяти, `_jobs`/`job_id`) не переживает
-перезапуск backend'а — см. `backend/jobs.py`. Сами результаты не теряются:
-`good.txt`/`needs_review.txt`/`debug.jsonl` пишутся на диск построчно с
-`flush()` по ходу выполнения, а не одним махом в конце, и статус
-дополнительно дублируется в `output_dir/_job_status.json` на каждый
-обработанный файл — см. `GET /jobs/status_snapshot` выше.
+Job state (in-memory counters/status, `_jobs`/`job_id`) doesn't survive a
+backend restart — see `backend/jobs.py`. The results themselves aren't lost:
+`good.txt`/`needs_review.txt`/`debug.jsonl` are written to disk line by line
+with `flush()` as the job runs, not all at once at the end, and the status is
+additionally duplicated to `output_dir/_job_status.json` on every processed
+file — see `GET /jobs/status_snapshot` above.
 
-Один вызов recognize_* (paddle/surya/tesseract на одну строку) ограничен
-`ENGINE_CALL_TIMEOUT_SECONDS` (по умолчанию 30с, `backend/config.py`) — если
-движок завис (не просто медленный — recognize_* сами ловят исключения и
-возвращают пустой результат, см. `backend/recognizers.py`), для этой строки
-он считается пустым, а не блокирует весь job. Таймаут не убивает поток
-движка — он просто перестаёт ждать; сам вызов может доработать в фоне.
+A single recognize_* call (paddle/surya/tesseract on one line) is bounded by
+`ENGINE_CALL_TIMEOUT_SECONDS` (default 30s, `backend/config.py`) — if an
+engine hangs (not just slow — recognize_* itself catches exceptions and
+returns an empty result, see `backend/recognizers.py`), that line is treated
+as empty rather than blocking the whole job. The timeout doesn't kill the
+engine's thread — it just stops waiting on it; the call itself may still
+finish in the background.
 
-## Именование кропов (`crops/`)
+## Crop naming (`crops/`)
 
-Кропы именуются по схеме предшественника этого пайплайна (`predict.py::save_image`),
-а не непрозрачным `uuid4`: `crops/{N // CROPS_PER_FOLDER}/image_{N:05d}.webp`,
-где `N` — сквозной номер кропа и `CROPS_PER_FOLDER = 10000` (`backend/config.py`) —
-то есть не больше 10000 файлов на подпапку (`crops/0/`, `crops/1/`, ...).
-Нумерация при повторном запуске на тот же `output_dir` продолжается с
-максимума, уже найденного на диске (`backend/pipeline.py::_resume_img_count`),
-а не начинается заново с 1 — иначе повторный запуск затёр бы уже
-сохранённые/импортированные кропы прошлых запусков под теми же именами.
+Crops are named after this pipeline's predecessor's scheme
+(`predict.py::save_image`), not opaque `uuid4`:
+`crops/{N // CROPS_PER_FOLDER}/image_{N:05d}.webp`, where `N` is the crop's
+running number and `CROPS_PER_FOLDER = 10000` (`backend/config.py`) — i.e. no
+more than 10000 files per subfolder (`crops/0/`, `crops/1/`, ...). On a
+re-run against the same `output_dir`, numbering continues from the max
+already found on disk (`backend/pipeline.py::_resume_img_count`) rather than
+restarting from 1 — otherwise a re-run would overwrite crops already
+saved/imported from previous runs under the same names.
 
-## Отладочные данные авторазметки (`debug.jsonl`)
+## Auto-labeling debug data (`debug.jsonl`)
 
-Рядом с `good.txt`/`needs_review.txt` в `output_dir` пишется `debug.jsonl` —
-по одной JSON-записи на строку:
+Alongside `good.txt`/`needs_review.txt` in `output_dir`, `debug.jsonl` is
+written — one JSON record per line:
 
 ```json
 {"crop": "crops/0/image_00001.webp", "bucket": "good", "engine": "paddle", "diverged": false,
  "engines": {"paddle": {"text": "...", "score": 0.97}, "surya": {"text": "...", "score": 0.93}, "tesseract": {"text": "...", "score": 0.81}}}
 ```
 
-`engines` в записи содержит только те движки, что реально были прогнаны на
-эту строку (см. `engines`/`min_agree` в `/run` выше) — не всегда все 3. Без
-этого файла победивший текст в `good.txt`/`needs_review.txt` — это всё, что
-остаётся от голосования (`backend/consensus.py::vote`); ни имя победившего
-движка, ни варианты проигравших нигде больше не сохраняются.
-Фронтенд использует `debug.jsonl` для показа деталей разметчику (см.
-`frontend/src/annotations.py::AnnotationManager._load_debug_file`) — если
-файла нет (например, при чисто ручной разметке), это не ошибка, просто
-детали показывать нечем. PDF-страницы с извлечённым текстовым слоем (без
-OCR) в `debug.jsonl` не попадают — там `vote()` не вызывается.
+The `engines` field in a record only contains the engines that were actually
+run on that line (see `engines`/`min_agree` in `/run` above) — not always all
+3. Without this file, the winning text in `good.txt`/`needs_review.txt` is
+all that's left of the vote (`backend/consensus.py::vote`); neither the
+winning engine's name nor the losing variants are stored anywhere else. The
+frontend uses `debug.jsonl` to show details to the labeler (see
+`frontend/src/annotations.py::AnnotationManager._load_debug_file`) — if the
+file is missing (e.g. for purely manual labeling), that's not an error, there
+are just no details to show. PDF pages with an extracted text layer (no OCR)
+don't end up in `debug.jsonl` — `vote()` isn't called for them.
 
 ## PDF
 
-Входная папка (`input_dir`) может содержать `.pdf`-файлы наравне с
-изображениями. Для каждого PDF сначала проверяются первые 2 страницы на
-наличие извлекаемого текстового слоя (`extract_pdf_text_layer=true`,
-значение по умолчанию):
+The input folder (`input_dir`) can contain `.pdf` files alongside images. For
+each PDF, the first 2 pages are checked for an extractable text layer first
+(`extract_pdf_text_layer=true`, the default):
 
-- **Есть текстовый слой** — текст и координаты вытаскиваются напрямую через
-  `pypdfium2` (без OCR), каждая строка сразу попадает в `good.txt`.
-  Страницы без текста внутри такого документа пропускаются (не отправляются
-  в OCR-fallback).
-- **Нет текстового слоя** (в т.ч. если текст появляется только начиная с
-  3-й страницы — проверяются только первые 2) — документ обрабатывается
-  постранично как обычное растровое изображение, через тот же
-  OCR-консенсус выбранных `engines`/`min_agree`.
+- **Has a text layer** — text and coordinates are pulled directly via
+  `pypdfium2` (no OCR), each line goes straight into `good.txt`. Pages
+  without text inside such a document are skipped (not sent to the
+  OCR fallback).
+- **No text layer** (including when text only appears from page 3 onward —
+  only the first 2 pages are checked) — the document is processed page by
+  page as a regular raster image, through the same OCR consensus with the
+  selected `engines`/`min_agree`.
 
-**Известное ограничение**: "текстовый слой" не отличается от текста,
-добавленного самим сканером (searchable PDF от сканирующего ПО) — такой слой
-может быть неточным (собственный OCR сканера), но будет доверчиво помечен
-как `good`. Для папок с такими сканами явно выключайте
+**Known limitation**: a "text layer" isn't distinguished from text added by
+the scanner itself (a searchable PDF from scanning software) — such a layer
+can be inaccurate (the scanner's own OCR), but will be trustingly marked as
+`good`. For folders with such scans, explicitly turn off
 `extract_pdf_text_layer`.

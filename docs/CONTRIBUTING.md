@@ -1,68 +1,79 @@
-# Разработка
+# Development
 
-<!-- AUTO-GENERATED: раздел ниже синхронизирован с pyproject.toml, requirements*.txt и docker-compose.yml.
-     Не редактировать вручную — перегенерируется через /update-docs. -->
+<p align="center">
+  <strong>Language:</strong>
+  <b>English</b> |
+  <a href="ru/CONTRIBUTING.md">🇷🇺 Русский</a>
+</p>
 
-## Требования
+<!-- AUTO-GENERATED: the section below is synced with pyproject.toml, requirements*.txt, and docker-compose.yml.
+     Do not edit by hand — it's regenerated via /update-docs. NOTE: /update-docs regenerates
+     Russian prose into docs/ru/CONTRIBUTING.md; re-translate this section by hand afterward
+     to keep it in sync. -->
 
-- Python 3.11 (см. `target-version = "py311"` в `pyproject.toml`)
-- Системный бинарник Tesseract с языковыми пакетами `rus`/`eng`, если работаете с `backend/` (см. `backend/README.md`)
-- Docker + Docker Compose — опционально, для запуска обоих сервисов без локальной установки зависимостей (см. `docs/docker.md`)
+## Requirements
 
-## Установка
+- Python 3.12 (see `frontend/Dockerfile`/`backend/Dockerfile` — `python:3.12-slim`; ruff's `target-version = "py311"` in `pyproject.toml` is only the linter's syntax-compatibility floor, not the actual requirement)
+- A system Tesseract binary with the `rus`/`eng` language packs if you're working on `backend/` (see `backend/README.md`)
+- Docker + Docker Compose — optional, for running both services without installing dependencies locally (see `docs/docker.md`)
 
-Frontend и backend — независимые сервисы с раздельными наборами зависимостей:
+## Installation
+
+Frontend and backend are independent services with separate dependency sets:
 
 ```bash
-pip install -r frontend/requirements.txt   # Streamlit-приложение
-pip install -r backend/requirements.txt    # FastAPI OCR-consensus спайк
-pip install -r requirements-dev.txt        # pytest, ruff — общие для обоих
+pip install -r frontend/requirements.txt   # the Streamlit app
+pip install -r backend/requirements.txt    # the FastAPI OCR-consensus spike
+pip install -r requirements-dev.txt        # pytest, ruff — shared by both
 ```
 
-Нет ни `venv`-конфигурации, ни lock-файла в репозитории — окружение настраивается вручную.
+No `venv` config and no lockfile in the repo — set up the environment manually.
 
-## Доступные команды
+## Available commands
 
-| Команда | Назначение |
+| Command | Purpose |
 |---|---|
-| `cd frontend && streamlit run app.py --server.enableXsrfProtection=false` | Запуск frontend в dev-режиме |
-| `uvicorn backend.main:app --reload` (из корня репозитория) | Запуск backend в dev-режиме |
-| `pytest` | Запуск всех тестов (`frontend/tests/` + `backend/tests/`, см. `testpaths` в `pyproject.toml`) |
-| `pytest --cov=src --cov=backend --cov-report=term-missing` | Тесты с покрытием |
-| `ruff check .` | Линтер (репозиторий целиком) |
-| `ruff format .` | Форматтер |
-| `docker compose up --build` | Запуск обоих сервисов в контейнерах, см. `docs/docker.md` |
+| `cd frontend && streamlit run app.py --server.enableXsrfProtection=false` | Run the frontend in dev mode |
+| `uvicorn backend.main:app --reload` (from the repo root) | Run the backend in dev mode |
+| `pytest` | Run all tests (`frontend/tests/` + `backend/tests/`, see `testpaths` in `pyproject.toml`) |
+| `pytest --cov=src --cov=backend --cov-report=term-missing` | Tests with coverage |
+| `ruff check .` | Linter (whole repo) |
+| `ruff format .` | Formatter |
+| `docker compose up --build` | Run both services in containers, see `docs/docker.md` |
 
 <!-- END AUTO-GENERATED -->
 
-## Тестирование
+## Testing
 
-Полное описание — в `docs/testing.md`. Кратко: `backend/detector.py` и
-`backend/recognizers.py` не покрыты юнит-тестами намеренно (лениво импортируют
-тяжёлые ML-зависимости, требуют реальных моделей/системного Tesseract).
-Manual UI-флоу Streamlit-приложения всё равно нужно проверять руками — запустить
-приложение и пройти по флоу разметки.
+Full details in `docs/testing.md`. In short: `backend/detector.py` and
+`backend/recognizers.py` are deliberately not covered by unit tests (they
+lazily import heavy ML dependencies, need real models/a system Tesseract).
+The Streamlit app's manual UI flow still needs to be checked by hand — run
+the app and click through the labeling flow.
 
-## Стиль кода
+## Code style
 
-- `ruff` — и линтер, и форматтер, конфигурация в `pyproject.toml`
-- Правила `pyupgrade` (`UP`) сознательно отключены — проект хранит
-  `Dict`/`List`/`Optional` из `typing`, не переписывать на `dict`/`list`/`X | None`
-  (см. `CLAUDE.md`, раздел «Code Style»)
-- Русскоязычные строки UI, комментарии и docstring — новый код должен быть
-  консистентен с этим соглашением
-- Без `frozen=True` на dataclass — сохраняется намеренно (см. `docs/architecture.md`)
+- `ruff` — both the linter and the formatter, configured in `pyproject.toml`
+- The `pyupgrade` rules (`UP`) are deliberately disabled — the project keeps
+  `Dict`/`List`/`Optional` from `typing`, don't rewrite them to
+  `dict`/`list`/`X | None` (see `CLAUDE.md`, "Code Style" section)
+- User-facing UI strings go through `frontend/src/i18n.py::t()` (RU/EN) —
+  new UI strings need a key in both languages, not a hardcoded literal. Code
+  comments and docstrings stay Russian-language, per existing convention
+- No `frozen=True` on dataclasses — kept intentionally (see `docs/architecture.md`)
 
-## Чеклист перед PR
+## Pre-PR checklist
 
-- [ ] `ruff check .` и `ruff format .` без ошибок
-- [ ] `pytest` зелёный
-- [ ] Если менялся формат данных (`rec.txt`, `status_cache.txt`, `handwritten.txt`,
-      `.backups/metadata.json`, `good.txt`/`needs_review.txt`) — обновлён
-      `docs/architecture.md` и/или `docs/CODEMAPS/data.md`
-- [ ] Если менялись роуты `backend/main.py` — обновлён `backend/README.md` и/или
-      `docs/CODEMAPS/backend.md`
-- [ ] Ручная проверка UI-флоу в Streamlit, если менялся `frontend/src/ui/`
+- [ ] `ruff check .` and `ruff format .` pass with no errors
+- [ ] `pytest` is green
+- [ ] If a data format changed (`rec.txt`, `status_cache.txt`, `handwritten.txt`,
+      `.backups/metadata.json`, `good.txt`/`needs_review.txt`) — `docs/architecture.md`
+      and/or `docs/CODEMAPS/data.md` is updated
+- [ ] If `backend/main.py` routes changed — `backend/README.md` and/or
+      `docs/CODEMAPS/backend.md` is updated
+- [ ] If a UI string was added or changed — a key was added to `frontend/src/i18n.py::STRINGS`
+      for both `ru` and `en`
+- [ ] Manual check of the UI flow in Streamlit if `frontend/src/ui/` changed
 
-В репозитории нет отдельного PR-шаблона и нет CI — коммитятся напрямую в `main`
-(см. `CLAUDE.md`, раздел «Conventions»).
+There's no separate PR template and no CI in this repo — commits go straight
+to `main` (see `CLAUDE.md`, "Conventions" section).

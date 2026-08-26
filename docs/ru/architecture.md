@@ -1,0 +1,61 @@
+# Архитектура
+
+<p align="center">
+  <strong>Language:</strong>
+  <a href="../architecture.md">English</a> |
+  <b>🇷🇺 Русский</b>
+</p>
+
+## Карта модулей
+
+Frontend (`frontend/`) — Streamlit-приложение для разметки:
+
+| Файл | Ответственность |
+|---|---|
+| `frontend/app.py` | Тонкий роутер режимов: `st.set_page_config`, CSS, `init_session_state`, стартовый экран выбора режима (`render_mode_landing`), маршрутизация в `render_generation_mode`/`render_manual_mode` |
+| `frontend/src/models.py` | `ImageRecord` — структура данных для одной записи изображения |
+| `frontend/src/backup.py` | `BackupManager` — создание, ротация и восстановление резервных копий файла аннотаций |
+| `frontend/src/annotations.py` | `AnnotationManager` — загрузка/сохранение аннотаций, кэш статусов, удаление записей; `save_as_handwritten` — экспорт изображения как рукописного |
+| `frontend/src/image_ops.py` | `load_and_resize_image` (кэшированная загрузка изображения) и `rotate_image` (поворот на 90°, сбрасывает кэш) |
+| `frontend/src/hotkeys.py` | `register_hotkeys` — JS-обработчик горячих клавиш ←/→ |
+| `frontend/src/i18n.py` | `t`/`get_lang`/`set_lang`/`render_language_switch` — локализация строк UI (RU/EN) и переключатель языка по флажкам |
+| `frontend/src/ui/list_view.py` | `render_image_list` — список изображений с фильтром и пагинацией |
+| `frontend/src/ui/editor_view.py` | `render_image_editor` — редактор текущего изображения: текст, удаление, поворот, навигация |
+| `frontend/src/ui/sidebar.py` | `render_sidebar` — статистика, сохранение всех изменений, управление бэкапами |
+| `frontend/src/ui/manual_mode.py` | `render_manual_mode` — перенесённый флоу ручной разметки: загрузка файла/рабочей директории, инициализация `AnnotationManager`, список/редактор/сайдбар |
+| `frontend/src/ui/generation_view.py` | `render_generation_mode` — статус моделей Paddle/Surya/Tesseract, запуск/статус OCR-консенсуса, handoff в ручной режим без file_uploader |
+
+Backend (`backend/`) — FastAPI-спайк консенсуса OCR: см. `backend/README.md`.
+
+## Формат данных
+
+### Файл разметки (`rec.txt` / загружаемый .txt)
+Табуляция-разделённый формат, одна строка на изображение:
+```
+относительный_путь\tтекст_аннотации
+```
+Источник: `AnnotationManager.load_from_file` (`frontend/src/annotations.py`), `AnnotationManager.save_changes` (`frontend/src/annotations.py`).
+
+### `status_cache.txt`
+Одно имя файла изображения (не путь) на строку — список изображений с `is_marked=True`. Расположен по пути `base_dir/<первый_сегмент_пути>/status_cache.txt`, где `<первый_сегмент_пути>` берётся из первого компонента относительного пути первой загруженной записи.
+Источник: `AnnotationManager._load_status_cache` (`frontend/src/annotations.py`).
+
+### `handwritten.txt`
+Табуляция-разделённый, дозаписываемый (append-only) файл с проверкой дубликатов по точному совпадению строки:
+```
+handwritten_images/относительный_путь\tтекст_аннотации
+```
+Сопровождается физической копией изображения в `base_dir/handwritten_images/`.
+Источник: `save_as_handwritten` (`frontend/src/annotations.py`).
+
+### `.backups/metadata.json`
+JSON с ключом `"backups"` — список объектов `{file, timestamp, operation, original}`, ротируется до `max_backups` записей (по умолчанию 5).
+Источник: `BackupManager` (`frontend/src/backup.py`).
+
+## Известные хрупкие места
+
+### Связка кэша изображений (`frontend/src/image_ops.py`)
+`load_and_resize_image` декорирована `@st.cache_data`. После сохранения повёрнутого файла `rotate_image` вызывает `load_and_resize_image.clear()`, что сбрасывает **весь** кэш этой функции (не только для конкретного `image_path`), чтобы следующая отрисовка перечитала файл с диска, а не отдала устаревший кэшированный превью. Обе функции обязаны находиться в одном модуле — если `load_and_resize_image` будет продублирована или повторно задекорирована где-то ещё, `.clear()` перестанет работать на нужном экземпляре кэша, и повёрнутые изображения будут показывать устаревшую превьюшку без единой ошибки в логах.
+
+### Связка горячих клавиш с текстом кнопок (`frontend/src/hotkeys.py` ↔ `frontend/src/ui/editor_view.py`)
+JS-обработчик в `register_hotkeys` (`frontend/src/hotkeys.py`) находит кнопки навигации исключительно по буквальному совпадению символов `←`/`→` в `btn.textContent` — без использования `id`/`key`. Кнопки навигации создаются в `render_image_editor` (`frontend/src/ui/editor_view.py`, строки с `st.button("←", ...)` и `st.button("→", ...)`). Если текст этих кнопок изменится даже косметически (пробел, эмодзи), горячие клавиши молча перестанут работать — без каких-либо ошибок. Именно поэтому эти два символа остаются захардкоженными и не идут через `frontend/src/i18n.py` — они намеренно не зависят от языка интерфейса.

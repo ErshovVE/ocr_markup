@@ -1,59 +1,64 @@
 # Docker
 
-Два независимых сервиса — они не общаются друг с другом по сети, каждый со
-своим Dockerfile:
+<p align="center">
+  <strong>Language:</strong>
+  <b>English</b> |
+  <a href="ru/docker.md">🇷🇺 Русский</a>
+</p>
 
-| Сервис | Dockerfile | Что внутри | Порт |
+Two independent services — they don't talk to each other over the network,
+each has its own Dockerfile:
+
+| Service | Dockerfile | What's inside | Port |
 |---|---|---|---|
-| `frontend` | `frontend/Dockerfile` | Streamlit-приложение `frontend/app.py` + `frontend/src/` | 8501 |
-| `backend` | `backend/Dockerfile` | FastAPI-спайк консенсуса (`backend/`) — PaddleOCR + SuryaOCR + Tesseract | 8756 |
+| `frontend` | `frontend/Dockerfile` | The Streamlit app `frontend/app.py` + `frontend/src/` | 8501 |
+| `backend` | `backend/Dockerfile` | The FastAPI consensus spike (`backend/`) — PaddleOCR + SuryaOCR + Tesseract | 8756 |
 
-## Запуск через docker compose
+## Running via docker compose
 
 ```bash
 docker compose up --build
 ```
 
 - Frontend: http://localhost:8501
-- Backend: http://localhost:8756 (см. `backend/README.md` за описанием API)
+- Backend: http://localhost:8756 (see `backend/README.md` for the API reference)
 
-Оба сервиса монтируют `./data` (создайте эту папку на хосте и положите туда
-рабочую директорию с изображениями/разметкой) в `/data` контейнера — это
-единственный способ передать реальные файлы внутрь контейнера, так как
-приложения не имеют доступа к остальной файловой системе хоста.
+Both services mount `./data` (create this folder on the host and put your
+working directory with images/annotations there) at `/data` inside the
+container — this is the only way to pass real files into the container,
+since the apps have no access to the rest of the host filesystem.
 
-`backend` дополнительно использует именованные volume'ы
-`paddleocr-models`/`surya-models`, чтобы модели PaddleOCR/SuryaOCR скачивались
-один раз и переживали пересоздание контейнера.
+`backend` additionally uses the named volumes `paddleocr-models`/`surya-models`
+so PaddleOCR/SuryaOCR models are downloaded once and survive container
+recreation.
 
-## Сборка и запуск по отдельности
+## Building and running individually
 
-Frontend (контекст сборки — корень репозитория):
+Frontend (build context — repo root):
 
 ```bash
 docker build -f frontend/Dockerfile -t ocr-markup-frontend .
 docker run --rm -p 8501:8501 -v "$(pwd)/data:/data" ocr-markup-frontend
 ```
 
-Backend (контекст сборки — корень репозитория, не `backend/`, так как образ
-использует абсолютный импорт `backend.main`):
+Backend (build context — repo root, not `backend/`, since the image uses the
+absolute import `backend.main`):
 
 ```bash
 docker build -f backend/Dockerfile -t ocr-markup-backend .
 docker run --rm -p 8756:8756 -v "$(pwd)/data:/data" ocr-markup-backend
 ```
 
-## Важно
+## Important
 
-- Backend — это спайк без аутентификации, который принимает произвольные
-  `input_dir`/`output_dir` в теле запроса (см. `backend/README.md`). Внутри
-  контейнера эти пути ограничены смонтированными volume'ами, но не
-  ограничивайте `docker run`/`docker compose` секцию `volumes` продакшн-данными
-  без необходимости.
-- Backend-образ тяжёлый (PaddleOCR + SuryaOCR + системный Tesseract) — первая
-  сборка и первый запуск (скачивание ML-моделей) могут занять продолжительное
-  время.
-- Frontend-образ не включает `predict.py`/`predict.ipynb` и
-  PyInstaller-обвязку (`frontend/wrapper.py`, `frontend/pyinst_command.txt`,
-  `frontend/build_exe.py`, `frontend/requirements-build.txt`) — они не
-  участвуют в запуске приложения (см. `CLAUDE.md`).
+- The backend is an unauthenticated spike that accepts an arbitrary
+  `input_dir`/`output_dir` in the request body (see `backend/README.md`).
+  Inside the container those paths are constrained by the mounted volumes,
+  but don't unnecessarily point the `docker run`/`docker compose` `volumes`
+  section at production data.
+- The backend image is heavy (PaddleOCR + SuryaOCR + system Tesseract) — the
+  first build and first run (downloading ML models) can take a while.
+- The frontend image doesn't include `predict.py`/`predict.ipynb` or the
+  PyInstaller wiring (`frontend/wrapper.py`, `frontend/pyinst_command.txt`,
+  `frontend/build_exe.py`, `frontend/requirements-build.txt`) — they aren't
+  part of running the app (see `CLAUDE.md`).

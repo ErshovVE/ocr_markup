@@ -1,109 +1,114 @@
 # Runbook
 
-Локальный спайк без продакшн-деплоя, CI/CD или системы алертинга — этот
-runbook покрывает только то, что реально существует: запуск, проверку
-состояния и типичные проблемы. Не содержит процедур эскалации/on-call, так
-как их в проекте нет.
+<p align="center">
+  <strong>Language:</strong>
+  <b>English</b> |
+  <a href="ru/RUNBOOK.md">🇷🇺 Русский</a>
+</p>
 
-## Запуск
+A local spike with no production deployment, CI/CD, or alerting system — this
+runbook covers only what actually exists: startup, health checks, and common
+issues. It has no escalation/on-call procedures, since the project has none.
 
-### Локально (без Docker)
+## Startup
+
+### Locally (no Docker)
 ```bash
 # Frontend
 cd frontend && streamlit run app.py --server.enableXsrfProtection=false
 
-# Backend (из корня репозитория — абсолютные импорты backend.*)
+# Backend (from repo root — absolute backend.* imports)
 uvicorn backend.main:app --reload
 ```
-Важно: рабочие директории в UI вводятся как `/data/...` — это конвенция
-Docker-монтирования (см. ниже), при нативном запуске такого пути не
-существует. Указывайте реальный путь на хосте либо запускайте через Docker
-Compose, чтобы `/data/...` резолвился как обычно.
+Important: working directories are entered in the UI as `/data/...` — that's
+the Docker-mount convention (see below); such a path doesn't exist under a
+native run. Either enter the real path on the host, or run via Docker Compose
+so `/data/...` resolves as usual.
 
 ### Docker Compose
 ```bash
 docker compose up -d --build --force-recreate
 ```
-Frontend: http://localhost:8501, backend: http://localhost:8756. Подробности
-монтирования `./data` и volume'ов моделей — в `docs/docker.md`.
+Frontend: http://localhost:8501, backend: http://localhost:8756. Details on
+mounting `./data` and the model volumes — in `docs/docker.md`.
 
-**`--build --force-recreate` обязательны при любом изменении кода**, просто
-`docker compose up -d` недостаточно: `docker-compose.yml` монтирует volume'ом
-только `./data:/data`, исходники (`frontend/src`, `app.py`, весь `backend/`)
-копируются в образ при сборке. Без пересборки+пересоздания контейнер
-продолжает крутить старый код — команда завершится успешно, но изменения
-не применятся, без единой ошибки.
+**`--build --force-recreate` are required for any code change** — plain
+`docker compose up -d` isn't enough: `docker-compose.yml` mounts only
+`./data:/data` as a volume, the sources (`frontend/src`, `app.py`, all of
+`backend/`) are copied into the image at build time. Without a
+rebuild+recreate, the container keeps running the old code — the command
+succeeds, but the changes don't apply, with no error at all.
 
-Передеплой одного сервиса (быстрее, чем пересборка обоих):
+Redeploying a single service (faster than rebuilding both):
 ```bash
 docker compose build frontend && docker compose up -d --force-recreate --no-deps frontend
 docker compose build backend  && docker compose up -d --force-recreate --no-deps backend
 ```
 
-Проверка, что передеплой реально применился — не полагаться на вывод
-команды, а проверить содержимое контейнера напрямую:
+Verifying the redeploy actually took — don't rely on the command's output,
+check the container's contents directly:
 ```bash
-docker exec ocr_markup-frontend-1 grep -c "<изменённый_символ>" /app/src/<file>.py
-docker exec ocr_markup-backend-1  grep -c "<изменённый_символ>" /app/backend/<file>.py
+docker exec ocr_markup-frontend-1 grep -c "<changed_symbol>" /app/src/<file>.py
+docker exec ocr_markup-backend-1  grep -c "<changed_symbol>" /app/backend/<file>.py
 ```
 
-## Проверка состояния ("health check")
+## Health check
 
-Backend не имеет отдельного `/health`, но `GET /models/status` даёт
-эквивалентный сигнал готовности:
+The backend has no dedicated `/health`, but `GET /models/status` gives an
+equivalent readiness signal:
 
 ```bash
 curl http://127.0.0.1:8756/models/status
 ```
-Ответ: `{"paddle": {...}, "surya": {...}, "tesseract": {...}}`, каждое —
+Response: `{"paddle": {...}, "surya": {...}, "tesseract": {...}}`, each one —
 `{"status": "not_checked"|"checking"|"ready"|"error", "detail": ...}`.
-Frontend опрашивает этот же эндпоинт в `generation_view.py::_render_model_status`.
+The frontend polls this same endpoint in `generation_view.py::_render_model_status`.
 
-Job-статус конкретного запуска: `GET /status/{job_id}` →
+Job status for a specific run: `GET /status/{job_id}` →
 `{"status": "running"|"done"|"error"|"cancelled", "error": ..., "error_count": ...,
-"errors": [...]}` — `errors` хранит последние 50 сообщений об ошибках/таймаутах
-строк/файлов (сам `error_count` не ограничен).
+"errors": [...]}` — `errors` holds the last 50 line/file error/timeout
+messages (`error_count` itself is unbounded).
 
-Активное задание без известного `job_id`: `GET /jobs/active` →
-`{"job_id": str|null}`. Статус последнего запуска на конкретную `output_dir`,
-переживающий рестарт backend'а (в отличие от предыдущих двух — job_id и
-`_jobs` теряются вместе с памятью процесса): `GET /jobs/status_snapshot?output_dir=...`
-(404, если для этой папки ещё не было запусков).
+Active job with an unknown `job_id`: `GET /jobs/active` →
+`{"job_id": str|null}`. Status of the last run for a specific `output_dir`,
+surviving a backend restart (unlike the previous two — job_id and `_jobs` are
+lost with the process's memory): `GET /jobs/status_snapshot?output_dir=...`
+(404 if there have been no runs yet for that folder).
 
-## Типичные проблемы
+## Common issues
 
-| Симптом | Причина | Что делать |
+| Symptom | Cause | What to do |
 |---|---|---|
-| После передеплоя код как будто не изменился | Контейнер пересоздан из старого образа — `up -d` без `--build`/`--force-recreate` не подхватывает изменения исходников (см. «Запуск» выше) | Пересобрать образ и пересоздать контейнер (`--build --force-recreate`), проверить содержимое контейнера через `docker exec ... grep` |
-| Путь `/data/...` внезапно "не находится", рабочая папка как будто пропала | Приложение запущено нативным процессом в обход Docker Compose — `./data` на хосте цел, но `/data` вне контейнера не существует | Проверить `ls ./data` на хосте (данные на месте), поднять контейнеры через `docker compose up -d` |
-| Порт 8501/8756 уже занят, либо `netstat -ano` показывает два процесса на одном порту | На практике встречался осиротевший `wslrelay.exe` (проброс порта WSL2 от Docker Desktop) рядом с нативным процессом на том же порту | Сначала `tasklist /FI "PID eq <pid>"`, чтобы понять, что именно за процесс, прежде чем его останавливать; затем поднять чисто через Docker Compose |
-| `models/status.tesseract == "error"` | Системный Tesseract не установлен или отсутствует языковой пакет | Установить `tesseract-ocr`, проверить `tesseract --list-langs` содержит `rus`/`eng` (см. `backend/README.md`) |
-| Первый запуск backend'а очень долгий | PaddleOCR/SuryaOCR скачивают модели при первом использовании | Дождаться; при повторных запусках через Docker — убедиться, что volume'ы `paddleocr-models`/`surya-models` не пересозданы. `POST /run` теперь возвращает `warnings`, если нужная модель ещё не готова — эта же информация видна в UI сразу после запуска |
-| Job "застрял" в `running` после перезапуска backend'а | Статус задания хранится в памяти процесса (`backend/jobs.py::_jobs`), теряется при рестарте | Сами `good.txt`/`needs_review.txt`/`debug.jsonl`/`crops/` не теряются (пишутся на диск построчно) — узнать, чем закончилось задание, можно через `GET /jobs/status_snapshot?output_dir=...` (снэпшот статуса, переживающий рестарт) |
-| Задание нужно остановить вручную | — | `POST /jobs/{job_id}/cancel` (или кнопка «⏹ Отменить» в UI). Отмена кооперативная — проверяется между файлами/страницами/строками, не мгновенная; уже записанное не теряется |
-| Один движок (Paddle/Surya/Tesseract) стабильно таймаутится на конкретных строках, `error_count` растёт | Ожидаемо для по-настоящему зависшего вызова — `_run_engines_with_timeout` (`backend/pipeline.py`) отдаёт этой строке пустой результат и продолжает; каждый вызов — одноразовый поток, зависание не отнимает мощность у будущих строк/job'ов | Смотреть `errors` в `/status`/`/jobs/status_snapshot` для конкретных сообщений. Если весь job выглядит замершим (не растёт `docs_processed` минутами) — это уже не про таймаут движка, смотреть `docker logs ocr_markup-backend-1` |
-| Горячие клавиши ←/→ не работают | JS-обработчик матчится по буквальному тексту кнопок, легко ломается косметическими изменениями | См. хрупкое место в `docs/architecture.md`; проверить, не изменился ли текст кнопок в `editor_view.py` |
-| Повёрнутое изображение показывает старую превьюшку | Кэш `st.cache_data` не сброшен корректно | См. хрупкое место в `docs/architecture.md` (связка `image_ops.py`) |
-| `POST /run` принимает произвольный путь и перезаписывает файлы там | Осознанное отсутствие валидации путей — локальный однопользовательский спайк без аутентификации | Не запускать backend на общей/многопользовательской машине как есть (см. `backend/README.md`) |
+| After a redeploy the code looks unchanged | The container was recreated from a stale image — `up -d` without `--build`/`--force-recreate` doesn't pick up source changes (see "Startup" above) | Rebuild the image and recreate the container (`--build --force-recreate`), verify the container's contents with `docker exec ... grep` |
+| The `/data/...` path suddenly "isn't found", the working folder seems to be gone | The app is running as a native process outside Docker Compose — `./data` on the host is intact, but `/data` doesn't exist outside the container | Check `ls ./data` on the host (the data is there), bring the containers up via `docker compose up -d` |
+| Port 8501/8756 already in use, or `netstat -ano` shows two processes on the same port | In practice, an orphaned `wslrelay.exe` (Docker Desktop's WSL2 port forwarding) alongside a native process on the same port | First `tasklist /FI "PID eq <pid>"` to see what the process actually is before stopping it; then bring things up cleanly via Docker Compose |
+| `models/status.tesseract == "error"` | System Tesseract isn't installed, or the language pack is missing | Install `tesseract-ocr`, check that `tesseract --list-langs` includes `rus`/`eng` (see `backend/README.md`) |
+| The backend's first run is very slow | PaddleOCR/SuryaOCR download models on first use | Wait it out; on repeated runs via Docker — make sure the `paddleocr-models`/`surya-models` volumes weren't recreated. `POST /run` now returns `warnings` if a needed model isn't ready yet — the same info is visible in the UI right after starting a run |
+| A job is "stuck" in `running` after a backend restart | Job status is held in the process's memory (`backend/jobs.py::_jobs`), lost on restart | `good.txt`/`needs_review.txt`/`debug.jsonl`/`crops/` themselves aren't lost (written to disk line by line) — check how the job actually ended via `GET /jobs/status_snapshot?output_dir=...` (a status snapshot that survives a restart) |
+| A job needs to be stopped manually | — | `POST /jobs/{job_id}/cancel` (or the "⏹ Cancel" button in the UI). Cancellation is cooperative — checked between files/pages/lines, not instant; anything already written isn't lost |
+| One engine (Paddle/Surya/Tesseract) consistently times out on specific lines, `error_count` keeps growing | Expected for a genuinely hung call — `_run_engines_with_timeout` (`backend/pipeline.py`) returns an empty result for that line and moves on; each call is a one-off thread, a hang doesn't take capacity away from future lines/jobs | Check `errors` in `/status`/`/jobs/status_snapshot` for the specific messages. If the whole job looks frozen (`docs_processed` not growing for minutes) — that's no longer an engine timeout, check `docker logs ocr_markup-backend-1` |
+| The ←/→ hotkeys don't work | The JS handler matches by literal button text, easily broken by cosmetic changes | See the fragile coupling in `docs/architecture.md`; check whether the button text in `editor_view.py` changed |
+| A rotated image shows a stale preview | `st.cache_data` wasn't cleared correctly | See the fragile coupling in `docs/architecture.md` (the `image_ops.py` coupling) |
+| `POST /run` accepts an arbitrary path and overwrites files there | A deliberate lack of path validation — a local, single-user, unauthenticated spike | Don't run the backend on a shared/multi-user machine as-is (see `backend/README.md`) |
 
-## Откат
+## Rollback
 
-Нет CI/CD и нет тегированных релизов — откат = `git revert`/`git checkout`
-нужного коммита в `main`. Для Docker-образов — пересборка и пересоздание
-контейнеров после отката кода:
+No CI/CD and no tagged releases — rollback means `git revert`/`git checkout`
+of the target commit on `main`. For Docker images — rebuild and recreate the
+containers after rolling back the code:
 ```bash
 docker compose build && docker compose up -d --force-recreate
 ```
-Именованные volume'ы с моделями откатывать не нужно (формат кэша моделей не
-версионируется в этом репозитории). Данные под `./data` — размеченные
-файлы, `good.txt`/`needs_review.txt`/`debug.jsonl`/`crops/` — откатом кода
-не затрагиваются, они не versioned вместе с кодом. Откатывать код
-незавершённого job'а бессмысленно — сначала отменить задание
-(`POST /jobs/{job_id}/cancel`), затем откатывать и передеплоить.
+The named model volumes don't need rolling back (the model cache format isn't
+versioned in this repo). Data under `./data` — labeled files,
+`good.txt`/`needs_review.txt`/`debug.jsonl`/`crops/` — is unaffected by a code
+rollback, it isn't versioned with the code. Rolling back the code for an
+in-progress job doesn't make sense — cancel the job first
+(`POST /jobs/{job_id}/cancel`), then roll back and redeploy.
 
-## Мониторинг и алертинг
+## Monitoring and alerting
 
-Не настроены. Единственный сигнал — ручной опрос `/models/status`,
-`/status/{job_id}` / `/jobs/status_snapshot` (см. выше) либо логи процесса
-(`docker logs ocr_markup-frontend-1` / `ocr_markup-backend-1`, либо
-`uvicorn`/`streamlit` stdout при нативном запуске).
+Not configured. The only signal is manually polling `/models/status`,
+`/status/{job_id}` / `/jobs/status_snapshot` (see above), or the process logs
+(`docker logs ocr_markup-frontend-1` / `ocr_markup-backend-1`, or the
+`uvicorn`/`streamlit` stdout for a native run).
