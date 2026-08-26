@@ -45,4 +45,4 @@ ruff format .
 
 Правила pyupgrade (`UP`) намеренно не включены — проект сознательно сохраняет
 `Dict`/`List`/`Optional` из `typing` вместо `dict`/`list`/`X | None`
-(см. `CLAUDE.md`, раздел «Code Style»), и `UP` предлагал бы это переписать.
+и `UP` предлагал бы это переписать.

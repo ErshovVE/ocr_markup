@@ -56,7 +56,7 @@ the app and click through the labeling flow.
 - `ruff` — both the linter and the formatter, configured in `pyproject.toml`
 - The `pyupgrade` rules (`UP`) are deliberately disabled — the project keeps
   `Dict`/`List`/`Optional` from `typing`, don't rewrite them to
-  `dict`/`list`/`X | None` (see `CLAUDE.md`, "Code Style" section)
+  `dict`/`list`/`X | None`
 - User-facing UI strings go through `frontend/src/i18n.py::t()` (RU/EN) —
   new UI strings need a key in both languages, not a hardcoded literal. Code
   comments and docstrings stay Russian-language, per existing convention
@@ -76,4 +76,4 @@ the app and click through the labeling flow.
 - [ ] Manual check of the UI flow in Streamlit if `frontend/src/ui/` changed
 
 There's no separate PR template and no CI in this repo — commits go straight
-to `main` (see `CLAUDE.md`, "Conventions" section).
+to `main`.

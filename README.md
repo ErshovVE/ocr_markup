@@ -83,8 +83,9 @@ backend/              FastAPI OCR-consensus service
   tests/
 docs/                 architecture, Docker, testing, runbook — see below
   ru/                   Russian translations of everything under docs/, backend/README.md, and this README
-predict.py            standalone offline data-generation script (not part of either service)
 ```
+
+`predict.py`/`predict.ipynb` (an offline data-generation script referenced in `backend/README.md`'s crop-naming scheme) are not part of this repository — deliberately gitignored, since they pull in a heavier, unlisted dependency set and hardcode local model paths.
 
 ## Documentation
 

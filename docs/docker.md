@@ -61,4 +61,4 @@ docker run --rm -p 8756:8756 -v "$(pwd)/data:/data" ocr-markup-backend
 - The frontend image doesn't include `predict.py`/`predict.ipynb` or the
   PyInstaller wiring (`frontend/wrapper.py`, `frontend/pyinst_command.txt`,
   `frontend/build_exe.py`, `frontend/requirements-build.txt`) — they aren't
-  part of running the app (see `CLAUDE.md`).
+  part of running the app.

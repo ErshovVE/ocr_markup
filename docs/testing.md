@@ -44,5 +44,4 @@ ruff format .
 
 The pyupgrade rules (`UP`) are deliberately disabled — the project
 intentionally keeps `Dict`/`List`/`Optional` from `typing` instead of
-`dict`/`list`/`X | None` (see `CLAUDE.md`, "Code Style" section), and `UP`
-would suggest rewriting that.
+`dict`/`list`/`X | None`, and `UP` would suggest rewriting that.
