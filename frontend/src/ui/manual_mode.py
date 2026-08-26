@@ -3,6 +3,7 @@ import os
 import streamlit as st
 
 from src.annotations import AnnotationManager
+from src.i18n import t
 from src.ui.editor_view import render_image_editor
 from src.ui.list_view import render_image_list
 from src.ui.sidebar import render_sidebar
@@ -11,20 +12,20 @@ from src.ui.sidebar import render_sidebar
 def render_manual_mode():
     """Отрисовывает режим ручной разметки: загрузка файла + список/редактор/сайдбар"""
     if st.session_state.manager is None:
-        uploaded_file = st.file_uploader("Загрузите файл разметки (.txt)", type=["txt"])
+        uploaded_file = st.file_uploader(t("upload_label"), type=["txt"])
         if not uploaded_file:
             return
 
         working_dir = st.text_input(
-            "Укажите рабочую директорию", placeholder="Например: /data/Датасет"
+            t("working_dir_label"), placeholder=t("working_dir_placeholder")
         )
 
         if not working_dir:
-            st.warning("Укажите рабочую директорию")
+            st.warning(t("working_dir_warning"))
             return
 
         if not os.path.isdir(working_dir):
-            st.error("Указанная директория не существует")
+            st.error(t("dir_not_exist_error"))
             return
 
         annotation_file = os.path.join(working_dir, uploaded_file.name)
@@ -44,15 +45,15 @@ def render_manual_mode():
     filtered = manager.get_image_list(st.session_state.filter_option)
 
     if not filtered:
-        st.warning("Нет изображений по выбранному фильтру")
+        st.warning(t("no_images_filter_warning"))
 
         filter_opts = {
-            "all": "Все",
-            "unmarked": "Неразмеченные",
-            "marked": "Размеченные",
-            "diverged": "Спорные",
+            "all": t("filter_all"),
+            "unmarked": t("filter_unmarked"),
+            "marked": t("filter_marked"),
+            "diverged": t("filter_diverged"),
         }
-        st.radio("Показать:", list(filter_opts.values()), key="empty_filter")
+        st.radio(t("show_label"), list(filter_opts.values()), key="empty_filter")
         return
 
     col1, col2 = st.columns([1, 2])

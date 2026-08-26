@@ -1,9 +1,10 @@
 import streamlit as st
 
+from src.i18n import render_language_switch, t
 from src.ui.generation_view import render_generation_mode
 from src.ui.manual_mode import render_manual_mode
 
-st.set_page_config(layout="wide", page_title="Инструмент разметки OCR")
+st.set_page_config(layout="wide", page_title="OCR Markup / Разметка OCR")
 
 
 def init_session_state():
@@ -33,14 +34,14 @@ def check_hotkeys():
 
 def render_mode_landing():
     """Отрисовывает стартовый экран с выбором режима работы"""
-    st.subheader("Выберите режим работы")
+    st.subheader(t("mode_landing_subheader"))
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🤖 Авторазметка", use_container_width=True):
+        if st.button(t("mode_generation_btn"), use_container_width=True):
             st.session_state.app_mode = "generation"
             st.rerun()
     with col2:
-        if st.button("✍️ Ручная разметка", use_container_width=True):
+        if st.button(t("mode_manual_btn"), use_container_width=True):
             st.session_state.app_mode = "manual"
             st.rerun()
 
@@ -62,15 +63,16 @@ def main():
         unsafe_allow_html=True,
     )
 
-    st.title("🖼️ OCR Разметка")
-
     init_session_state()
+    render_language_switch()
+
+    st.title(t("app_title"))
 
     if st.session_state.app_mode is None:
         render_mode_landing()
         return
 
-    if st.button("🔁 Сменить режим", key="switch_mode"):
+    if st.button(t("switch_mode_btn"), key="switch_mode"):
         st.session_state.app_mode = None
         st.rerun()
 

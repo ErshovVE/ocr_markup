@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import streamlit as st
 
 from src.backup import BackupManager
+from src.i18n import t
 from src.models import ImageRecord
 
 DEBUG_FILENAME = "debug.jsonl"
@@ -63,7 +64,7 @@ class AnnotationManager:
                     )
 
             if not self.records:
-                return False, "Не удалось найти файлы изображений"
+                return False, t("no_image_files_found")
 
             # Загружаем статусы из кэша
             self._load_status_cache()
@@ -71,7 +72,7 @@ class AnnotationManager:
             return True, ""
 
         except Exception as e:
-            return False, f"Ошибка загрузки: {e}"
+            return False, t("load_error", err=e)
 
     def _load_debug_file(self):
         """Загружает debug.jsonl (детали авторазметки — тексты/score всех
@@ -154,7 +155,7 @@ class AnnotationManager:
         try:
             os.remove(record.absolute_path)
         except OSError as e:
-            st.error(f"Ошибка удаления файла: {e}")
+            st.error(t("file_delete_error", err=e))
             return False
 
         # Удаляем из структур данных
@@ -175,7 +176,7 @@ class AnnotationManager:
                     self.annotation_file, operation="save"
                 )
                 if backup_path:
-                    st.info(f"📦 Бэкап создан: {backup_path.name}")
+                    st.info(t("backup_created", name=backup_path.name))
 
             # Сохраняем файл аннотаций
             lines = []
@@ -195,10 +196,10 @@ class AnnotationManager:
                 )
 
             self.modified_records.clear()
-            return True, "Изменения сохранены"
+            return True, t("changes_saved")
 
         except Exception as e:
-            return False, f"Ошибка сохранения: {e}"
+            return False, t("save_error", err=e)
 
     def get_image_list(self, filter_type: str = "all") -> List[str]:
         """Возвращает отфильтрованный список имен изображений"""
@@ -236,7 +237,7 @@ def save_as_handwritten(
         if handwritten_txt.exists():
             content = handwritten_txt.read_text(encoding="utf-8")
             if new_line in content:
-                st.info("Запись уже существует в handwritten.txt")
+                st.info(t("handwritten_exists"))
                 return True
 
         with open(handwritten_txt, "a", encoding="utf-8") as f:
@@ -244,5 +245,5 @@ def save_as_handwritten(
 
         return True
     except Exception as e:
-        st.error(f"Ошибка сохранения как рукописный: {e}")
+        st.error(t("handwritten_save_error", err=e))
         return False

@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 
 import streamlit as st
 
+from src.i18n import t
+
 
 class BackupManager:
     """Управление резервными копиями с ротацией"""
@@ -65,7 +67,7 @@ class BackupManager:
 
             return backup_path
         except Exception as e:
-            st.error(f"Ошибка создания бэкапа: {e}")
+            st.error(t("backup_create_error", err=e))
             return None
 
     def _rotate_backups(self):
@@ -95,7 +97,7 @@ class BackupManager:
             shutil.copy2(backup_path, target_file)
             return True
         except Exception as e:
-            st.error(f"Ошибка восстановления: {e}")
+            st.error(t("backup_restore_error", err=e))
             return False
 
     def get_backups_list(self) -> List[Dict]:

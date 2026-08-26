@@ -3,22 +3,23 @@ from typing import List
 import streamlit as st
 
 from src.annotations import AnnotationManager
+from src.i18n import t
 
 
 def render_image_list(manager: AnnotationManager, filtered_images: List[str]):
     """Отрисовывает список изображений с пагинацией"""
-    st.subheader("Список изображений")
+    st.subheader(t("image_list_header"))
 
     # Фильтр
     filter_options = {
-        "all": "Все",
-        "unmarked": "Неразмеченные",
-        "marked": "Размеченные",
-        "diverged": "Спорные",
+        "all": t("filter_all"),
+        "unmarked": t("filter_unmarked"),
+        "marked": t("filter_marked"),
+        "diverged": t("filter_diverged"),
     }
 
     selected = st.radio(
-        "Показать:",
+        t("show_label"),
         list(filter_options.values()),
         index=list(filter_options.keys()).index(st.session_state.filter_option),
         key="filter_radio",
