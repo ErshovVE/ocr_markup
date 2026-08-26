@@ -208,9 +208,10 @@ __marimo__/
 
 
 *.ipynb
-!predict.ipynb
 *core/config.py
 images/
-data/*
+data/
 .claude/
+.reports/
 CLAUDE.md
+predict.py
