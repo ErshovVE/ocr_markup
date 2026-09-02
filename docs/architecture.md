@@ -23,9 +23,26 @@ Frontend (`frontend/`) — the Streamlit labeling app:
 | `frontend/src/ui/editor_view.py` | `render_image_editor` — the current image's editor: text, delete, rotate, navigation |
 | `frontend/src/ui/sidebar.py` | `render_sidebar` — stats, save-all, backup management |
 | `frontend/src/ui/manual_mode.py` | `render_manual_mode` — the manual-labeling flow: file/working-directory upload, `AnnotationManager` init, list/editor/sidebar |
-| `frontend/src/ui/generation_view.py` | `render_generation_mode` — Paddle/Surya/Tesseract model status, OCR-consensus run/status, handoff into manual mode without a file_uploader |
+| `frontend/src/ui/generation_view.py` | `render_generation_mode` — model status (Paddle/Surya/Tesseract + VLM engines), the "Classic / VLM" run-type radio and both run forms, OCR run/status, handoff into manual mode without a file_uploader |
 
 Backend (`backend/`) — the FastAPI OCR-consensus spike: see `backend/README.md`.
+
+There are **two auto-labeling paths**, chosen by `mode` in `/run`
+(`jobs.start_job` picks the `run_fn`; `JobState` and the progress tracker are
+shared):
+
+| Path | Module | How it works |
+|---|---|---|
+| `mode="consensus"` (default) | `backend/pipeline.py` | per line: detector → line crop → `recognize_*` → `consensus.vote` |
+| `mode="vlm"` | `backend/pipeline_vlm.py` | per page: one HTTP call to a vision-language model → response parser → IoU grouping of several models |
+
+VLM-mode modules: `vlm_client.py` (OpenAI-compatible HTTP), `vlm_adapters.py`
+(prompts + per-model response parsers), `vlm_geometry.py` (`iou` /
+`merge_adjacent` / `rect_polygon`), `vlm_consensus.py` (IoU box grouping +
+majority text vote), `vlm_layout.py` (region boxes for GLM via the `paddle`
+detector — not unit-tested, like `detector.py`). Provisioning of the external
+model services lives in `scripts/vlm/` and the `vlm-cpu`/`vlm-gpu` compose
+profiles.
 
 ## Data formats
 
@@ -59,3 +76,6 @@ Source: `BackupManager` (`frontend/src/backup.py`).
 
 ### Hotkeys coupled to button text (`frontend/src/hotkeys.py` ↔ `frontend/src/ui/editor_view.py`)
 The JS handler in `register_hotkeys` (`frontend/src/hotkeys.py`) finds navigation buttons purely by a literal match of the `←`/`→` characters in `btn.textContent` — it does not use `id`/`key`. Navigation buttons are created in `render_image_editor` (`frontend/src/ui/editor_view.py`, the `st.button("←", ...)` and `st.button("→", ...)` lines). If that button text changes even cosmetically (a space, an emoji), the hotkeys silently stop working — with no errors. This is exactly why these two glyphs stay hardcoded rather than going through `frontend/src/i18n.py`: they're language-independent by design, on purpose.
+
+### VLM pipeline reuses `backend/pipeline.py` privates (`backend/pipeline_vlm.py`)
+`pipeline_vlm.py` imports `_resume_img_count`, `_crop_paths`, `_save_crop` and `MIN_CROP_PIX` directly from `backend/pipeline.py` so both auto-labeling paths write identical `good.txt` lines and share one resumable crop-numbering scheme across `crops/`. If any of those move or change signature in `pipeline.py`, the VLM path breaks — keep the crop-path/write contract identical between the two modules, or extract the shared helpers into a common module used by both.
