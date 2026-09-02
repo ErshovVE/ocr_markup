@@ -52,6 +52,36 @@ def _fake_pipeline_run(n_files=3, sleep_s=0.0, n_errors=0):
     return fake_run
 
 
+def _fake_vlm_run(n_files=2):
+    def fake_run(
+        input_dir,
+        output_dir,
+        *,
+        vlm_engines,
+        vlm_min_agree,
+        iou_threshold,
+        on_found=None,
+        on_file_done=None,
+        on_line_done=None,
+        on_error=None,
+        should_cancel=None,
+    ):
+        if on_found:
+            on_found(n_files)
+        processed = 0
+        for _ in range(n_files):
+            if should_cancel and should_cancel():
+                break
+            if on_line_done:
+                on_line_done("good", False)
+            if on_file_done:
+                on_file_done()
+            processed += 1
+        return processed, 0
+
+    return fake_run
+
+
 def _wait_until_finished(job_id, timeout=2.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -71,6 +101,20 @@ def test_start_job_reports_done_with_counts(monkeypatch, tmp_path):
     assert job.status == "done"
     assert job.docs_found == 3
     assert job.good_count == 3
+    assert jobs.get_active_job_id() is None
+
+
+def test_start_job_vlm_mode_reports_counts_through_shared_tracker(monkeypatch, tmp_path):
+    monkeypatch.setattr(jobs.pipeline_vlm, "run", _fake_vlm_run(n_files=2))
+
+    job_id = jobs.start_job(
+        str(tmp_path), str(tmp_path / "out"), 0.9, mode="vlm", vlm_engines=["dots_ocr"]
+    )
+    job = _wait_until_finished(job_id)
+
+    assert job.status == "done"
+    assert job.docs_found == 2
+    assert job.good_count == 2
     assert jobs.get_active_job_id() is None
 
 

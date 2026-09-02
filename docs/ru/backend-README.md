@@ -156,3 +156,77 @@ OCR) в `debug.jsonl` не попадают — там `vote()` не вызыв�
 может быть неточным (собственный OCR сканера), но будет доверчиво помечен
 как `good`. Для папок с такими сканами явно выключайте
 `extract_pdf_text_layer`.
+
+## VLM-режим (`mode="vlm"`)
+
+Второй путь авторазметки (`backend/pipeline_vlm.py`). Вместо построчного
+пайплайна (детектор → кроп строки → `recognize_*` → `vote`)
+vision-language-модель обрабатывает **страницу целиком за один forward** и
+сама отдаёт `(полигон строки, текст)`. Выход — те же
+`good.txt` / `needs_review.txt` / `debug.jsonl` / `crops/`, поэтому handoff в
+ручную разметку не меняется.
+
+Все модели подключаются через единый **OpenAI-совместимый HTTP**
+(`POST {endpoint}/v1/chat/completions` с `image_url`). Сами модели поднимаются
+**внешними сервисами** (llama-server / Ollama / vLLM) — backend добавляет
+единственную зависимость `httpx` и не тянет ML-веса VLM.
+
+### Поля `/run`
+
+`{"mode": "vlm", "input_dir": str, "output_dir": str, "vlm_engines": [str, ...], "vlm_min_agree": int, "iou_threshold": float}`
+→ `{"job_id": str, "warnings": [str]}`.
+
+- `vlm_engines` — непустое подмножество движков из таблицы ниже; иначе 400.
+- `vlm_min_agree` — сколько движков должны отдать совпадающий по IoU бокс с
+  одинаковым текстом, чтобы строка считалась `good` (аналог `min_agree`, но
+  по боксам — VLM per-line confidence не дают). Должно быть
+  `1..len(vlm_engines)`.
+- `iou_threshold` — порог совпадения боксов при сведении нескольких движков.
+  Должно быть в `(0, 1]`.
+- Классические поля (`engines` / `min_agree` / `detector_engine` / `lang`)
+  при `mode="vlm"` игнорируются. `mode` по умолчанию `"consensus"` — старые
+  клиенты работают без изменений.
+
+Трекер прогресса (`GET /status/{job_id}`) и `JobState` — общие с классическим
+путём (те же счётчики `good_count` / `review_count` / `diverged_count`).
+
+### Движки
+
+| id | env endpoint'а | дефолт | `gpu_only` | стратегия боксов | как поднять |
+|---|---|---|---|---|---|
+| `paddleocr_vl` | `PADDLEOCR_VL_ENDPOINT` | `http://localhost:11434` | нет | native | `ollama pull MedAIBase/PaddleOCR-VL:0.9b` (community-тег) |
+| `glm_ocr` | `GLM_OCR_ENDPOINT` | `http://localhost:11434` | нет | layout | `ollama pull glm-ocr` |
+| `hunyuan_ocr` | `HUNYUAN_OCR_ENDPOINT` | `http://localhost:8081` | нет | native | `llama-server -hf ggml-org/HunyuanOCR-GGUF --port 8081` |
+| `dots_ocr` | `DOTS_OCR_ENDPOINT` | `http://localhost:8082` | да | native | vLLM ≥ 0.11.0 (`rednote-hilab/dots.ocr`) |
+| `unlimited_ocr` | `UNLIMITED_OCR_ENDPOINT` | `http://localhost:8083` | да | native | vLLM / SGLang (`baidu/Unlimited-OCR`) |
+
+- **native** — модель сама отдаёт боксы (dots.ocr JSON, HunyuanOCR spotting
+  `text(x1,y1),(x2,y2)`, PaddleOCR-VL pipeline JSON, Unlimited-OCR
+  `<box>`-токены).
+- **layout** — модель отдаёт только markdown (`glm_ocr`); боксы строк даёт
+  `backend/vlm_layout.py`, переиспользуя тот же `paddle`-детектор строк, что и
+  классический путь, со слиянием соседних регионов (меньше HTTP-вызовов).
+- Если движок ничего не отдал (ошибка клиента/парсера) — его строки
+  пропускаются, сообщение уходит в `error_count`/`errors`, движок в
+  группировке этой страницы не участвует.
+
+Поднять сервисы: `scripts/vlm/setup.sh --cpu` (или
+`scripts\vlm\setup.ps1 -Cpu` на Windows), либо compose-профили
+`--profile vlm-cpu` / `--profile vlm-gpu` (см. `docs/docker.md`). Каждый
+движок виден в `GET /models/status` как `vlm_<id>` (живой пинг `/v1/models`,
+проверяется каждый запрос — не кэшируется, в отличие от Paddle/Surya).
+`/models/prepare` для VLM-движков **не поддерживается**.
+
+### `debug.jsonl` для VLM
+
+Форма та же, что у классического пути, но `score` всегда `1.0` (VLM per-line
+confidence не дают). `diverged` проставляется, когда ≥2 движка вернули
+непустой, но разный текст для одного бокса.
+
+### Ограничения
+
+- Страницы PDF всегда рендерятся в растр — текстовый слой в VLM-режиме не
+  используется (для PDF с текстовым слоем берите `mode="consensus"`).
+- Стратегия `layout` (GLM-OCR) даёт одну строку на найденный регион, не
+  обязательно одну визуальную строку текста.
+- Таблицы/формулы кладутся как обычные строки текста (датасет построчный).

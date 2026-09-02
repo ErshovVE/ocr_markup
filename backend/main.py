@@ -7,9 +7,12 @@ from pydantic import BaseModel
 from backend import jobs, models_status
 from backend.config import (
     DEFAULT_ENGINES,
+    DEFAULT_IOU_THRESHOLD,
     DEFAULT_MIN_AGREE,
     DEFAULT_SCORE_THRESHOLD,
+    DEFAULT_VLM_MIN_AGREE,
     RECOGNITION_ENGINES,
+    VLM_ENGINES,
 )
 from backend.detector import DEFAULT_DETECTOR_ENGINE, DETECTOR_ENGINES
 from backend.jobs import cancel_job, get_active_job_id, get_job, get_status_snapshot, start_job
@@ -26,7 +29,7 @@ def _readiness_warnings(req: "RunRequest") -> List[str]:
     """Предупреждения о неготовых моделях перед стартом job'а — раньше /run
     просто стартовал вслепую, и первая же строка могла "молча" зависнуть на
     скачивании гигабайтных весов без единого объяснения в UI."""
-    status = models_status.get_status()
+    status = models_status.get_status(include_vlm=req.mode == "vlm")
     warnings: List[str] = []
 
     def check(key: str, label: str) -> None:
@@ -41,6 +44,11 @@ def _readiness_warnings(req: "RunRequest") -> List[str]:
                 "с загрузки модели"
             )
 
+    if req.mode == "vlm":
+        for engine_id in req.vlm_engines:
+            check(f"vlm_{engine_id}", f"VLM {engine_id}")
+        return warnings
+
     if "paddle" in req.engines and req.lang == "ru":
         check("paddle", "PaddleOCR (распознавание)")
     if "surya" in req.engines:
@@ -51,6 +59,7 @@ def _readiness_warnings(req: "RunRequest") -> List[str]:
     if det_key:
         check(det_key, "Детектор строк")
     return warnings
+
 
 # Локальный однопользовательский сервис без аутентификации (см. backend/README.md) —
 # входные пути не ограничены заранее известным корнем намеренно, так как
@@ -83,6 +92,14 @@ class RunRequest(BaseModel):
     # backend/consensus.py::vote).
     engines: List[str] = list(DEFAULT_ENGINES)
     min_agree: int = DEFAULT_MIN_AGREE
+    # mode="consensus" (по умолчанию) — классический построчный консенсус;
+    # mode="vlm" — полностраничный VLM-парсинг (см. backend/pipeline_vlm.py).
+    # При mode="vlm" классические поля (engines/min_agree/detector_engine/lang)
+    # игнорируются, работают vlm_engines/vlm_min_agree/iou_threshold.
+    mode: str = "consensus"
+    vlm_engines: List[str] = []
+    vlm_min_agree: int = DEFAULT_VLM_MIN_AGREE
+    iou_threshold: float = DEFAULT_IOU_THRESHOLD
 
 
 class PrepareRequest(BaseModel):
@@ -93,29 +110,48 @@ class PrepareRequest(BaseModel):
 def run(req: RunRequest):
     if not os.path.isdir(req.input_dir):
         raise HTTPException(400, f"input_dir не найдена: {req.input_dir}")
-    if req.lang not in ("ru", "latin"):
-        raise HTTPException(400, f"lang должен быть 'ru' или 'latin': {req.lang}")
-    if req.latin_model_size not in LATIN_MODEL_SIZES:
-        raise HTTPException(
-            400,
-            f"latin_model_size должен быть одним из {LATIN_MODEL_SIZES}: "
-            f"{req.latin_model_size}",
-        )
-    if req.detector_engine not in DETECTOR_ENGINES:
-        raise HTTPException(
-            400,
-            f"detector_engine должен быть одним из {DETECTOR_ENGINES}: {req.detector_engine}",
-        )
-    if not req.engines or any(e not in RECOGNITION_ENGINES for e in req.engines):
-        raise HTTPException(
-            400,
-            f"engines должен быть непустым подмножеством {RECOGNITION_ENGINES}: {req.engines}",
-        )
-    if not (1 <= req.min_agree <= len(req.engines)):
-        raise HTTPException(
-            400,
-            f"min_agree должен быть от 1 до len(engines)={len(req.engines)}: {req.min_agree}",
-        )
+    if req.mode not in ("consensus", "vlm"):
+        raise HTTPException(400, f"mode должен быть 'consensus' или 'vlm': {req.mode}")
+
+    if req.mode == "vlm":
+        if not req.vlm_engines or any(e not in VLM_ENGINES for e in req.vlm_engines):
+            raise HTTPException(
+                400,
+                f"vlm_engines должен быть непустым подмножеством {VLM_ENGINES}: "
+                f"{req.vlm_engines}",
+            )
+        if not (1 <= req.vlm_min_agree <= len(req.vlm_engines)):
+            raise HTTPException(
+                400,
+                f"vlm_min_agree должен быть от 1 до len(vlm_engines)="
+                f"{len(req.vlm_engines)}: {req.vlm_min_agree}",
+            )
+        if not (0.0 < req.iou_threshold <= 1.0):
+            raise HTTPException(400, f"iou_threshold должен быть в (0, 1]: {req.iou_threshold}")
+    else:
+        if req.lang not in ("ru", "latin"):
+            raise HTTPException(400, f"lang должен быть 'ru' или 'latin': {req.lang}")
+        if req.latin_model_size not in LATIN_MODEL_SIZES:
+            raise HTTPException(
+                400,
+                f"latin_model_size должен быть одним из {LATIN_MODEL_SIZES}: "
+                f"{req.latin_model_size}",
+            )
+        if req.detector_engine not in DETECTOR_ENGINES:
+            raise HTTPException(
+                400,
+                f"detector_engine должен быть одним из {DETECTOR_ENGINES}: {req.detector_engine}",
+            )
+        if not req.engines or any(e not in RECOGNITION_ENGINES for e in req.engines):
+            raise HTTPException(
+                400,
+                f"engines должен быть непустым подмножеством {RECOGNITION_ENGINES}: {req.engines}",
+            )
+        if not (1 <= req.min_agree <= len(req.engines)):
+            raise HTTPException(
+                400,
+                f"min_agree должен быть от 1 до len(engines)={len(req.engines)}: {req.min_agree}",
+            )
 
     try:
         job_id = start_job(
@@ -129,6 +165,10 @@ def run(req: RunRequest):
             req.detector_engine,
             req.engines,
             req.min_agree,
+            req.mode,
+            req.vlm_engines,
+            req.vlm_min_agree,
+            req.iou_threshold,
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e

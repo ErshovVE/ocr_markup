@@ -27,6 +27,21 @@ CONSENSUS_SCHEME_ENGINES_COUNT = {"1_of_1": 1, "1_of_2": 2, "2_of_2": 2, "2_of_3
 CONSENSUS_SCHEME_MIN_AGREE = {"1_of_1": 1, "1_of_2": 1, "2_of_2": 2, "2_of_3": 2}
 DEFAULT_CONSENSUS_SCHEME = "2_of_3"
 
+# VLM-режим: тип разметки (радио) + модели полностраничного парсинга. id
+# совпадают с backend.config.VLM_ENGINES / models_status ключами vlm_<id>.
+RUN_TYPE_KEYS = ("classic", "vlm")
+VLM_MODELS = (
+    ("paddleocr_vl", "PaddleOCR-VL"),
+    ("glm_ocr", "GLM-OCR"),
+    ("hunyuan_ocr", "HunyuanOCR"),
+    ("dots_ocr", "dots.ocr"),
+    ("unlimited_ocr", "Unlimited-OCR"),
+)
+VLM_MODEL_LABELS = dict(VLM_MODELS)
+VLM_MODEL_KEYS = tuple(k for k, _ in VLM_MODELS)
+VLM_GPU_ONLY = {"dots_ocr", "unlimited_ocr"}
+DEFAULT_VLM_MODELS = ["paddleocr_vl"]
+
 
 def _status_labels():
     return {
@@ -120,6 +135,15 @@ def _render_model_status():
         det_key = DETECTOR_STATUS_KEYS[name]
         _render_engine_status_cell(row[2], det_key, det_key != "tesseract", "det")
 
+    st.markdown(t("vlm_section_header"))
+    for engine_id, label in VLM_MODELS:
+        display = label + (t("vlm_gpu_suffix") if engine_id in VLM_GPU_ONLY else "")
+        row = st.columns([2, 6])
+        row[0].write(display)
+        # Кнопки «Скачать» нет: VLM поднимает внешний сервис (см. scripts/vlm/),
+        # /models/prepare для них отвечает ошибкой.
+        _render_engine_status_cell(row[1], f"vlm_{engine_id}", False, "vlm")
+
     if st.button(t("refresh_status_btn"), key="models_refresh"):
         st.session_state.pop("models_status_cache", None)
         st.rerun()
@@ -172,6 +196,66 @@ def _render_go_to_manual_button(output_dir: str, diverged_count: int, key: str):
             st.rerun()
 
 
+def _submit_run(payload: dict):
+    """POST /run + разбор ответа — общий для классической и VLM-формы."""
+    try:
+        resp = requests.post(f"{BACKEND_URL}/run", json=payload, timeout=5)
+        resp.raise_for_status()
+        run_data = resp.json()
+        st.session_state.consensus_job_id = run_data["job_id"]
+        st.session_state.pop("consensus_status_data", None)
+        st.session_state.pop("consensus_snapshot", None)
+        st.success(t("run_started"))
+        for warning in run_data.get("warnings", []):
+            st.warning(warning)
+    except Exception as e:
+        st.error(t("run_start_error", err=_format_backend_error(e)))
+
+
+def _render_vlm_run_form(input_dir: str, output_dir: str):
+    """Форма запуска VLM-режима: выбор моделей + min_agree + порог IoU."""
+    status_cache = st.session_state.get("models_status_cache", {})
+
+    def _model_label(key: str) -> str:
+        return VLM_MODEL_LABELS[key] + (t("vlm_gpu_suffix") if key in VLM_GPU_ONLY else "")
+
+    selected = st.multiselect(
+        t("vlm_models_label"),
+        list(VLM_MODEL_KEYS),
+        default=DEFAULT_VLM_MODELS,
+        format_func=_model_label,
+        help=t("vlm_models_help"),
+        key="vlm_models",
+    )
+    for key in selected:
+        if status_cache.get(f"vlm_{key}", {}).get("status") == "error":
+            st.caption(t("vlm_endpoint_missing", name=VLM_MODEL_LABELS[key]))
+
+    max_agree = max(1, len(selected))
+    if max_agree > 1:
+        vlm_min_agree = st.slider(t("vlm_min_agree_label"), 1, max_agree, 1, key="vlm_min_agree")
+    else:
+        vlm_min_agree = 1
+    iou_threshold = st.slider(
+        t("iou_threshold_label"), 0.1, 0.9, 0.5, 0.05, key="vlm_iou_threshold"
+    )
+
+    if st.button(t("run_btn"), key="vlm_run"):
+        if not selected:
+            st.error(t("choose_vlm_models_error"))
+        else:
+            _submit_run(
+                {
+                    "mode": "vlm",
+                    "input_dir": input_dir,
+                    "output_dir": output_dir,
+                    "vlm_engines": selected,
+                    "vlm_min_agree": vlm_min_agree,
+                    "iou_threshold": iou_threshold,
+                }
+            )
+
+
 def _render_run_controls():
     if "consensus_job_id" not in st.session_state:
         _adopt_active_job()
@@ -184,6 +268,23 @@ def _render_run_controls():
         t("output_dir_label"), key="consensus_output", placeholder=t("output_dir_placeholder")
     )
 
+    run_type = st.radio(
+        t("run_type_label"),
+        list(RUN_TYPE_KEYS),
+        format_func=lambda k: t("run_type_classic") if k == "classic" else t("run_type_vlm"),
+        horizontal=True,
+        help=t("run_type_help"),
+        key="consensus_run_type",
+    )
+    if run_type == "vlm":
+        _render_vlm_run_form(input_dir, output_dir)
+    else:
+        _render_classic_run_form(input_dir, output_dir)
+
+    _render_job_tracker_section(output_dir)
+
+
+def _render_classic_run_form(input_dir: str, output_dir: str):
     col_det, col_thr = st.columns(2)
     detector_engine = col_det.selectbox(
         t("detector_engine_label"),
@@ -247,32 +348,24 @@ def _render_run_controls():
         if len(engines) != engines_count:
             st.error(t("choose_exact_engines_error", count=engines_count))
         else:
-            try:
-                resp = requests.post(
-                    f"{BACKEND_URL}/run",
-                    json={
-                        "input_dir": input_dir,
-                        "output_dir": output_dir,
-                        "score_threshold": threshold,
-                        "preferred_model": preferred,
-                        "extract_pdf_text_layer": extract_pdf_text_layer,
-                        "detector_engine": detector_engine,
-                        "engines": engines,
-                        "min_agree": min_agree,
-                    },
-                    timeout=5,
-                )
-                resp.raise_for_status()
-                run_data = resp.json()
-                st.session_state.consensus_job_id = run_data["job_id"]
-                st.session_state.pop("consensus_status_data", None)
-                st.session_state.pop("consensus_snapshot", None)
-                st.success(t("run_started"))
-                for warning in run_data.get("warnings", []):
-                    st.warning(warning)
-            except Exception as e:
-                st.error(t("run_start_error", err=_format_backend_error(e)))
+            _submit_run(
+                {
+                    "mode": "consensus",
+                    "input_dir": input_dir,
+                    "output_dir": output_dir,
+                    "score_threshold": threshold,
+                    "preferred_model": preferred,
+                    "extract_pdf_text_layer": extract_pdf_text_layer,
+                    "detector_engine": detector_engine,
+                    "engines": engines,
+                    "min_agree": min_agree,
+                }
+            )
 
+
+def _render_job_tracker_section(output_dir: str):
+    """Живой трекер job'а + восстановление статуса из снэпшота — общий блок для
+    обоих типов разметки (переиспользует consensus_job_id/consensus_status_data)."""
     if st.session_state.get("consensus_job_id"):
         _render_live_tracker()
 

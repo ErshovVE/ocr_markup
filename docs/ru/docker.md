@@ -32,6 +32,49 @@ docker compose up --build
 `paddleocr-models`/`surya-models`, чтобы модели PaddleOCR/SuryaOCR скачивались
 один раз и переживали пересоздание контейнера.
 
+## VLM-режим — опциональные companion-сервисы
+
+Путь авторазметки `mode="vlm"` (см. `backend/README.md`) требует внешних
+сервисов моделей. Они объявлены в `docker-compose.yml` под **профилями**,
+поэтому `docker compose up` их **не** поднимает по умолчанию.
+
+```bash
+# CPU-движки (Ollama: glm-ocr + PaddleOCR-VL, llama-server: HunyuanOCR)
+docker compose --profile vlm-cpu up -d
+
+# + GPU-движки (vLLM: dots.ocr + Unlimited-OCR; нужен nvidia-container-toolkit)
+docker compose --profile vlm-cpu --profile vlm-gpu up -d
+```
+
+либо скрипты-обёртки (печатают значения `*_ENDPOINT` и делают самопроверку
+`GET /models/status`):
+
+```bash
+./scripts/vlm/setup.sh --cpu            # Linux / macOS / WSL
+./scripts/vlm/setup.sh --gpu
+```
+```powershell
+.\scripts\vlm\setup.ps1 -Cpu            # Windows
+.\scripts\vlm\setup.ps1 -Gpu
+```
+
+| Сервис | Профиль | Порт | Обслуживает |
+|---|---|---|---|
+| `ollama` + `ollama-pull` | `vlm-cpu` | 11434 | `glm_ocr`, `paddleocr_vl` |
+| `llama-hunyuan` | `vlm-cpu` | 8081 | `hunyuan_ocr` |
+| `vllm-dots` | `vlm-gpu` | 8082 | `dots_ocr` |
+| `vllm-unlimited` | `vlm-gpu` | 8083 | `unlimited_ocr` |
+
+Сервис `backend` уже получает `GLM_OCR_ENDPOINT` / `PADDLEOCR_VL_ENDPOINT` /
+`HUNYUAN_OCR_ENDPOINT` / `DOTS_OCR_ENDPOINT` / `UNLIMITED_OCR_ENDPOINT` с
+указанием на эти сервисы (переопределяется через `.env` — см. `.env.example`).
+Первый запуск качает многогигабайтные веса, поэтому дайте `ollama-pull` /
+`llama-hunyuan` время до запуска VLM-задания. Готовность — в
+`GET /models/status` (ключи `vlm_*`) или на вкладке «📦 Модели» фронтенда.
+
+Контейнер `ollama-pull` — одноразовый init (`restart: "no"`), завершается
+после `ollama pull`.
+
 ## Сборка и запуск по отдельности
 
 Frontend (контекст сборки — корень репозитория):

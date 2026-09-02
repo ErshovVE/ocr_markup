@@ -23,7 +23,90 @@ services:
       - surya-models:/root/.cache/datalab
     environment:
       - PYTHONUNBUFFERED=1
+      # VLM-режим (см. backend/pipeline_vlm.py). Дефолты указывают на
+      # companion-сервисы ниже; переопределяются через .env / окружение.
+      - GLM_OCR_ENDPOINT=${GLM_OCR_ENDPOINT:-http://ollama:11434}
+      - PADDLEOCR_VL_ENDPOINT=${PADDLEOCR_VL_ENDPOINT:-http://ollama:11434}
+      - HUNYUAN_OCR_ENDPOINT=${HUNYUAN_OCR_ENDPOINT:-http://llama-hunyuan:8081}
+      - DOTS_OCR_ENDPOINT=${DOTS_OCR_ENDPOINT:-http://vllm-dots:8082}
+      - UNLIMITED_OCR_ENDPOINT=${UNLIMITED_OCR_ENDPOINT:-http://vllm-unlimited:8083}
+
+  # ── VLM companion-сервисы (по умолчанию НЕ поднимаются) ──────────────────
+  # CPU-профиль:  docker compose --profile vlm-cpu up -d
+  # GPU-профиль:  docker compose --profile vlm-gpu up -d   (нужен nvidia-container-toolkit)
+  # Скрипты-обёртки: scripts/vlm/setup.sh  /  scripts/vlm/setup.ps1
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["vlm-cpu"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    profiles: ["vlm-cpu"]
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "until ollama list >/dev/null 2>&1; do sleep 2; done;
+       ollama pull glm-ocr &&
+       ollama pull MedAIBase/PaddleOCR-VL:0.9b"
+    restart: "no"
+
+  llama-hunyuan:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    profiles: ["vlm-cpu"]
+    ports:
+      - "8081:8081"
+    volumes:
+      - llama-hf-cache:/root/.cache/llama.cpp
+    command: >
+      -hf ggml-org/HunyuanOCR-GGUF --host 0.0.0.0 --port 8081 -c 16384
+
+  vllm-dots:
+    image: vllm/vllm-openai:latest
+    profiles: ["vlm-gpu"]
+    ports:
+      - "8082:8082"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: >
+      --model rednote-hilab/dots.ocr --trust-remote-code --served-model-name dots.ocr
+      --port 8082
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  vllm-unlimited:
+    image: vllm/vllm-openai:latest
+    profiles: ["vlm-gpu"]
+    ports:
+      - "8083:8083"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: >
+      --model baidu/Unlimited-OCR --trust-remote-code --served-model-name baidu/Unlimited-OCR
+      --port 8083
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
   paddleocr-models:
   surya-models:
+  ollama-models:
+  llama-hf-cache:
+  hf-cache:

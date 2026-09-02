@@ -156,3 +156,77 @@ the scanner itself (a searchable PDF from scanning software) — such a layer
 can be inaccurate (the scanner's own OCR), but will be trustingly marked as
 `good`. For folders with such scans, explicitly turn off
 `extract_pdf_text_layer`.
+
+## VLM mode (`mode="vlm"`)
+
+A second auto-labeling path (`backend/pipeline_vlm.py`). Instead of the
+per-line pipeline (detector → line crop → `recognize_*` → `vote`), a
+vision-language model processes the **whole page in a single forward** and
+returns `(line polygon, text)` itself. The output is the same
+`good.txt` / `needs_review.txt` / `debug.jsonl` / `crops/`, so the handoff
+into manual labeling is unchanged.
+
+All models are reached over one **OpenAI-compatible HTTP** endpoint
+(`POST {endpoint}/v1/chat/completions` with an `image_url`). The models
+themselves run as **external services** (llama-server / Ollama / vLLM) — the
+backend adds only one dependency, `httpx`, and pulls no VLM ML weights.
+
+### `/run` fields
+
+`{"mode": "vlm", "input_dir": str, "output_dir": str, "vlm_engines": [str, ...], "vlm_min_agree": int, "iou_threshold": float}`
+→ `{"job_id": str, "warnings": [str]}`.
+
+- `vlm_engines` — non-empty subset of the table below; 400 otherwise.
+- `vlm_min_agree` — how many engines must return an IoU-matching box with the
+  same text for the line to count as `good` (analogue of `min_agree`, but over
+  boxes — VLMs give no per-line confidence). Must be `1..len(vlm_engines)`.
+- `iou_threshold` — box-match threshold when reconciling several engines.
+  Must be in `(0, 1]`.
+- The classic fields (`engines` / `min_agree` / `detector_engine` / `lang`)
+  are ignored when `mode="vlm"`. `mode` defaults to `"consensus"`, so old
+  clients are unaffected.
+
+The progress tracker (`GET /status/{job_id}`) and `JobState` are shared with
+the classic path — the same `good_count` / `review_count` / `diverged_count`
+counters.
+
+### Engines
+
+| id | endpoint env | default | `gpu_only` | box strategy | how to bring it up |
+|---|---|---|---|---|---|
+| `paddleocr_vl` | `PADDLEOCR_VL_ENDPOINT` | `http://localhost:11434` | no | native | `ollama pull MedAIBase/PaddleOCR-VL:0.9b` (community tag) |
+| `glm_ocr` | `GLM_OCR_ENDPOINT` | `http://localhost:11434` | no | layout | `ollama pull glm-ocr` |
+| `hunyuan_ocr` | `HUNYUAN_OCR_ENDPOINT` | `http://localhost:8081` | no | native | `llama-server -hf ggml-org/HunyuanOCR-GGUF --port 8081` |
+| `dots_ocr` | `DOTS_OCR_ENDPOINT` | `http://localhost:8082` | yes | native | vLLM ≥ 0.11.0 (`rednote-hilab/dots.ocr`) |
+| `unlimited_ocr` | `UNLIMITED_OCR_ENDPOINT` | `http://localhost:8083` | yes | native | vLLM / SGLang (`baidu/Unlimited-OCR`) |
+
+- **native** — the model returns boxes itself (dots.ocr JSON, HunyuanOCR
+  spotting `text(x1,y1),(x2,y2)`, PaddleOCR-VL pipeline JSON, Unlimited-OCR
+  `<box>` tokens).
+- **layout** — the model returns markdown only (`glm_ocr`); line boxes come
+  from `backend/vlm_layout.py`, which reuses the same `paddle` line detector
+  as the classic path and merges adjacent regions to cut HTTP calls.
+- If a model returns nothing (client/parse error), its lines are skipped and
+  a message goes into `error_count`/`errors` — the engine just doesn't
+  participate in that page's grouping.
+
+Bring the services up with `scripts/vlm/setup.sh --cpu` (or
+`scripts\vlm\setup.ps1 -Cpu` on Windows), or the compose profiles
+`--profile vlm-cpu` / `--profile vlm-gpu` (see `docs/docker.md`). Each engine
+also shows up in `GET /models/status` as `vlm_<id>` (a live `/v1/models` ping,
+re-checked every request — not cached like Paddle/Surya). `/models/prepare`
+is **not** supported for VLM engines.
+
+### `debug.jsonl` for VLM
+
+Same shape as the classic path, but `score` is always `1.0` (VLMs give no
+per-line confidence). `diverged` is set when ≥2 engines returned a non-empty
+but different text for the same box.
+
+### Limitations
+
+- PDF pages are always rasterised — the text layer is not used in VLM mode
+  (use `mode="consensus"` for text-layer PDFs).
+- `layout` strategy (GLM-OCR) yields one line per detected region, not
+  necessarily one visual text line.
+- Tables/formulas are stored as plain text lines (the dataset is per-line).

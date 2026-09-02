@@ -7,3 +7,7 @@ pytesseract==0.3.13
 opencv-python==4.10.0.84
 Pillow==10.4.0
 pypdfium2==4.30.0
+# VLM-режим: тонкий OpenAI-совместимый HTTP-клиент к внешним сервисам моделей
+# (llama-server / Ollama / vLLM). Единственная новая зависимость — тяжёлых ML-
+# пакетов VLM backend не тянет. Уже подтягивается транзитивно fastapi TestClient.
+httpx==0.28.1

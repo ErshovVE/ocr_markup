@@ -23,9 +23,25 @@ Frontend (`frontend/`) — Streamlit-приложение для разметк�
 | `frontend/src/ui/editor_view.py` | `render_image_editor` — редактор текущего изображения: текст, удаление, поворот, навигация |
 | `frontend/src/ui/sidebar.py` | `render_sidebar` — статистика, сохранение всех изменений, управление бэкапами |
 | `frontend/src/ui/manual_mode.py` | `render_manual_mode` — перенесённый флоу ручной разметки: загрузка файла/рабочей директории, инициализация `AnnotationManager`, список/редактор/сайдбар |
-| `frontend/src/ui/generation_view.py` | `render_generation_mode` — статус моделей Paddle/Surya/Tesseract, запуск/статус OCR-консенсуса, handoff в ручной режим без file_uploader |
+| `frontend/src/ui/generation_view.py` | `render_generation_mode` — статус моделей (Paddle/Surya/Tesseract + движки VLM), радио типа разметки «Классический / VLM» и обе формы запуска, запуск/статус OCR, handoff в ручной режим без file_uploader |
 
 Backend (`backend/`) — FastAPI-спайк консенсуса OCR: см. `backend/README.md`.
+
+**Два пути авторазметки**, выбор по `mode` в `/run` (`jobs.start_job`
+выбирает `run_fn`; `JobState` и трекер прогресса общие):
+
+| Путь | Модуль | Как работает |
+|---|---|---|
+| `mode="consensus"` (по умолчанию) | `backend/pipeline.py` | построчно: детектор → кроп строки → `recognize_*` → `consensus.vote` |
+| `mode="vlm"` | `backend/pipeline_vlm.py` | постранично: один HTTP-вызов vision-language-модели → парсер ответа → IoU-группировка нескольких моделей |
+
+Модули VLM-режима: `vlm_client.py` (OpenAI-совместимый HTTP), `vlm_adapters.py`
+(промпты + парсеры ответов по моделям), `vlm_geometry.py` (`iou` /
+`merge_adjacent` / `rect_polygon`), `vlm_consensus.py` (IoU-группировка боксов
++ мажоритарное голосование текстов), `vlm_layout.py` (боксы регионов для GLM
+через `paddle`-детектор — юнит-тестами не покрыт, как `detector.py`).
+Провижининг внешних сервисов моделей — в `scripts/vlm/` и compose-профилях
+`vlm-cpu`/`vlm-gpu`.
 
 ## Формат данных
 
@@ -59,3 +75,6 @@ JSON с ключом `"backups"` — список объектов `{file, times
 
 ### Связка горячих клавиш с текстом кнопок (`frontend/src/hotkeys.py` ↔ `frontend/src/ui/editor_view.py`)
 JS-обработчик в `register_hotkeys` (`frontend/src/hotkeys.py`) находит кнопки навигации исключительно по буквальному совпадению символов `←`/`→` в `btn.textContent` — без использования `id`/`key`. Кнопки навигации создаются в `render_image_editor` (`frontend/src/ui/editor_view.py`, строки с `st.button("←", ...)` и `st.button("→", ...)`). Если текст этих кнопок изменится даже косметически (пробел, эмодзи), горячие клавиши молча перестанут работать — без каких-либо ошибок. Именно поэтому эти два символа остаются захардкоженными и не идут через `frontend/src/i18n.py` — они намеренно не зависят от языка интерфейса.
+
+### VLM-пайплайн переиспользует приваты `backend/pipeline.py` (`backend/pipeline_vlm.py`)
+`pipeline_vlm.py` импортирует `_resume_img_count`, `_crop_paths`, `_save_crop` и `MIN_CROP_PIX` напрямую из `backend/pipeline.py`, чтобы оба пути авторазметки писали одинаковые строки `good.txt` и делили одну резюмируемую нумерацию кропов в `crops/`. Если что-то из этого переедет или сменит сигнатуру в `pipeline.py` — VLM-путь сломается. Держите контракт путей кропов и записи строк идентичным между двумя модулями либо вынесите общие хелперы в отдельный модуль.
