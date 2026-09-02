@@ -62,7 +62,9 @@ def _encode_image(image) -> str:
         new_size = (max(1, round(pil.size[0] * scale)), max(1, round(pil.size[1] * scale)))
         pil = pil.resize(new_size)
     buffer = io.BytesIO()
-    pil.save(buffer, "WEBP")
+    # quality=95: картинка идёт на вход OCR-модели, агрессивное lossy-сжатие
+    # текста (дефолт webp — 80) режет мелкие буквы; lossless раздул бы запрос.
+    pil.save(buffer, "WEBP", quality=95, method=4)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/webp;base64,{encoded}"
 
