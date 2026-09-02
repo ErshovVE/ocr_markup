@@ -21,6 +21,8 @@ from typing import Dict, Optional
 
 from platformdirs import user_cache_dir
 
+from backend.config import VLM_ENGINE_META, VLM_ENGINES
+
 PADDLE_MODEL_NAMES = {
     "paddle": "cyrillic_PP-OCRv5_mobile_rec",
     "paddle_detector": "PP-OCRv6_medium_det",
@@ -61,6 +63,29 @@ def check_tesseract() -> ModelState:
     return ModelState("ready")
 
 
+def check_vlm_endpoint(engine_id: str) -> ModelState:
+    """Пинг OpenAI-совместимого сервиса VLM-движка (GET {endpoint}/v1/models).
+
+    В отличие от Paddle/Surya не кэшируется — endpoint (внешний сервис,
+    llama-server / Ollama / vLLM) может подняться или упасть в любой момент,
+    поэтому проверяется заново на каждый запрос статуса, как tesseract.
+    """
+    meta = VLM_ENGINE_META.get(engine_id)
+    if meta is None:
+        return ModelState("error", f"Неизвестный VLM-движок: {engine_id}")
+    endpoint = os.environ.get(meta["endpoint_env"], "") or meta.get("default_endpoint", "")
+    if not endpoint:
+        return ModelState("error", f"{meta['endpoint_env']} не задан")
+    try:
+        import httpx
+
+        response = httpx.get(f"{endpoint.rstrip('/')}/v1/models", timeout=5)
+        response.raise_for_status()
+    except Exception as e:
+        return ModelState("error", f"Недоступен {endpoint}: {e}")
+    return ModelState("ready", endpoint)
+
+
 def _manifest_complete(model_dir: Path) -> bool:
     """Повторяет check_manifest() из surya/common/s3.py: модель считается
     скачанной, если рядом с файлами лежит manifest.json и все перечисленные
@@ -98,6 +123,8 @@ def get_status() -> Dict[str, ModelState]:
     for key, model_type in SURYA_MODEL_TYPES.items():
         if snapshot[key].status == "not_checked" and _surya_weights_on_disk(model_type):
             snapshot[key] = ModelState("ready", "Найдено в кэше на диске")
+    for engine_id in VLM_ENGINES:
+        snapshot[f"vlm_{engine_id}"] = check_vlm_endpoint(engine_id)
     return snapshot
 
 
@@ -124,6 +151,11 @@ def _prepare(name: str):
 
 
 def prepare(name: str) -> None:
+    if name.startswith("vlm_"):
+        raise ValueError(
+            "VLM-модели поднимаются внешним сервисом (llama-server / Ollama / vLLM), "
+            "/models/prepare для них не поддерживается — см. scripts/vlm/"
+        )
     if name not in _state:
         raise ValueError(f"Неизвестная модель: {name}")
     threading.Thread(target=_prepare, args=(name,), daemon=True).start()

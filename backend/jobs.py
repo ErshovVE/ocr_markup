@@ -16,8 +16,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional
 
-from backend import pipeline
-from backend.config import DEFAULT_ENGINES, DEFAULT_MIN_AGREE
+from backend import pipeline, pipeline_vlm
+from backend.config import (
+    DEFAULT_ENGINES,
+    DEFAULT_IOU_THRESHOLD,
+    DEFAULT_MIN_AGREE,
+    DEFAULT_VLM_MIN_AGREE,
+)
 from backend.detector import DEFAULT_DETECTOR_ENGINE
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE
 
@@ -115,6 +120,10 @@ def _run_job(
     detector_engine: str,
     engines: List[str] = DEFAULT_ENGINES,
     min_agree: int = DEFAULT_MIN_AGREE,
+    mode: str = "consensus",
+    vlm_engines: Optional[List[str]] = None,
+    vlm_min_agree: int = DEFAULT_VLM_MIN_AGREE,
+    iou_threshold: float = DEFAULT_IOU_THRESHOLD,
 ):
     global _active_job_id
     state = _jobs[job_id]
@@ -144,23 +153,37 @@ def _run_job(
         return state.cancel_event.is_set()
 
     try:
-        good_count, needs_review_count = pipeline.run(
-            input_dir,
-            output_dir,
-            threshold,
-            preferred_model,
-            lang,
-            latin_model_size,
-            extract_pdf_text_layer,
-            detector_engine,
-            engines=engines,
-            min_agree=min_agree,
-            on_found=on_found,
-            on_file_done=on_file_done,
-            on_line_done=on_line_done,
-            on_error=on_error,
-            should_cancel=should_cancel,
-        )
+        if mode == "vlm":
+            good_count, needs_review_count = pipeline_vlm.run(
+                input_dir,
+                output_dir,
+                vlm_engines=vlm_engines,
+                vlm_min_agree=vlm_min_agree,
+                iou_threshold=iou_threshold,
+                on_found=on_found,
+                on_file_done=on_file_done,
+                on_line_done=on_line_done,
+                on_error=on_error,
+                should_cancel=should_cancel,
+            )
+        else:
+            good_count, needs_review_count = pipeline.run(
+                input_dir,
+                output_dir,
+                threshold,
+                preferred_model,
+                lang,
+                latin_model_size,
+                extract_pdf_text_layer,
+                detector_engine,
+                engines=engines,
+                min_agree=min_agree,
+                on_found=on_found,
+                on_file_done=on_file_done,
+                on_line_done=on_line_done,
+                on_error=on_error,
+                should_cancel=should_cancel,
+            )
         state.status = "cancelled" if state.cancel_event.is_set() else "done"
         state.result = {
             "output_dir": output_dir,
@@ -186,11 +209,18 @@ def start_job(
     detector_engine: str = DEFAULT_DETECTOR_ENGINE,
     engines: List[str] = DEFAULT_ENGINES,
     min_agree: int = DEFAULT_MIN_AGREE,
+    mode: str = "consensus",
+    vlm_engines: Optional[List[str]] = None,
+    vlm_min_agree: int = DEFAULT_VLM_MIN_AGREE,
+    iou_threshold: float = DEFAULT_IOU_THRESHOLD,
 ) -> str:
-    """Запускает pipeline.run в фоновом потоке и сразу возвращает job_id.
+    """Запускает pipeline.run / pipeline_vlm.run в фоновом потоке и сразу
+    возвращает job_id.
 
-    engines/min_agree — выбранная схема распознавания ("1 из 1"/"1 из 2"/
-    "2 из 2"/"2 из 3", см. RunRequest в backend/main.py).
+    mode="consensus" (по умолчанию) — классический построчный консенсус
+    (engines/min_agree, схема "1 из 1"/"1 из 2"/"2 из 2"/"2 из 3"). mode="vlm" —
+    полностраничный VLM-парсинг (vlm_engines/vlm_min_agree/iou_threshold, см.
+    backend/pipeline_vlm.py). JobState/трекер общий для обоих путей.
 
     Поднимает RuntimeError, если уже выполняется другое задание — вызывающий
     код (main.py) должен превращать это в HTTP 409.
@@ -216,6 +246,10 @@ def start_job(
             detector_engine,
             engines,
             min_agree,
+            mode,
+            vlm_engines,
+            vlm_min_agree,
+            iou_threshold,
         ),
         daemon=True,
     )

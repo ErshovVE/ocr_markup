@@ -140,6 +140,22 @@ STRINGS = {
         "import_error": "{fname}: {err}",
         "import_general_error": "Ошибка импорта: {err}",
         "no_results_found": "В папке вывода не найдено результатов",
+        # generation_view.py — VLM-режим
+        "run_type_label": "Тип разметки",
+        "run_type_classic": "Классический консенсус",
+        "run_type_vlm": "VLM (полностраничный парсинг)",
+        "run_type_help": "Классический — построчный консенсус Paddle/Surya/Tesseract. "
+        "VLM — современная модель обрабатывает страницу целиком и сама отдаёт "
+        "строки с текстом (нужен поднятый сервис модели, см. scripts/vlm/).",
+        "vlm_models_label": "Модели VLM",
+        "vlm_models_help": "Несколько моделей сводятся в консенсус по совпадению боксов (IoU).",
+        "vlm_min_agree_label": "Согласование (минимум движков на строку)",
+        "iou_threshold_label": "Порог IoU совпадения боксов",
+        "vlm_gpu_suffix": " (GPU)",
+        "vlm_section_header": "**Модели VLM** (внешние сервисы)",
+        "vlm_endpoint_missing": "{name}: сервис не отвечает — задайте *_ENDPOINT "
+        "и поднимите модель (scripts/vlm/)",
+        "choose_vlm_models_error": "Выберите хотя бы одну модель VLM",
     },
     "en": {
         # app.py
@@ -242,11 +258,11 @@ STRINGS = {
         "scheme_1_of_1_help": "Runs one selected engine. No cross-check — the fastest option, "
         "but nothing catches it if the engine gets it wrong.",
         "scheme_1_of_2_label": "1 of 2 — either engine confident",
-        "scheme_1_of_2_help": "Runs two engines; a line counts as \"good\" as soon as "
+        "scheme_1_of_2_help": 'Runs two engines; a line counts as "good" as soon as '
         "at least one of them is confident in its answer — texts aren't cross-checked "
         "against each other.",
         "scheme_2_of_2_label": "2 of 2 — both must agree",
-        "scheme_2_of_2_help": "Runs two engines; a line counts as \"good\" only if both "
+        "scheme_2_of_2_help": 'Runs two engines; a line counts as "good" only if both '
         "independently recognized the same text.",
         "scheme_2_of_3_label": "2 of 3 — any two agree (default)",
         "scheme_2_of_3_help": "Runs all three engines; any two agreeing on the text is enough. "
@@ -277,6 +293,22 @@ STRINGS = {
         "import_error": "{fname}: {err}",
         "import_general_error": "Import error: {err}",
         "no_results_found": "No results found in the output folder",
+        # generation_view.py — VLM mode
+        "run_type_label": "Labeling type",
+        "run_type_classic": "Classic consensus",
+        "run_type_vlm": "VLM (full-page parsing)",
+        "run_type_help": "Classic — per-line Paddle/Surya/Tesseract consensus. "
+        "VLM — a modern model processes the whole page and returns text lines "
+        "itself (requires a running model service, see scripts/vlm/).",
+        "vlm_models_label": "VLM models",
+        "vlm_models_help": "Multiple models are reconciled by box overlap (IoU).",
+        "vlm_min_agree_label": "Agreement (min engines per line)",
+        "iou_threshold_label": "Box-match IoU threshold",
+        "vlm_gpu_suffix": " (GPU)",
+        "vlm_section_header": "**VLM models** (external services)",
+        "vlm_endpoint_missing": "{name}: service unreachable — set *_ENDPOINT "
+        "and start the model (scripts/vlm/)",
+        "choose_vlm_models_error": "Choose at least one VLM model",
     },
 }
 
