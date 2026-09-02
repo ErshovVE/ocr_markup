@@ -215,6 +215,39 @@ def test_pdf_render_failure_is_reported_per_page(monkeypatch, tmp_path):
     assert any("render exploded" in msg for msg in events["errors"])
 
 
+def test_engine_exception_is_reported_and_does_not_abort_the_page(monkeypatch, one_png, tmp_path):
+    def fake_chat(engine_id, prompt, image):
+        if engine_id == "dots_ocr":
+            raise RuntimeError("unexpected engine crash")
+        return "нормальный(10,10),(180,45)"
+
+    monkeypatch.setattr(pipeline_vlm.vlm_client, "chat", fake_chat)
+    monkeypatch.setattr(pipeline_vlm, "_save_crop", lambda *a, **k: None)
+    out = tmp_path / "out"
+
+    events, good, review = _run(
+        one_png, out, vlm_engines=["dots_ocr", "hunyuan_ocr"], vlm_min_agree=1
+    )
+
+    # dots_ocr упал, hunyuan_ocr отработал — страница не потеряна
+    assert good == 1
+    assert any("unexpected engine crash" in m for m in events["errors"])
+
+
+def test_out_of_bounds_bbox_is_clamped_not_wrapped(monkeypatch, one_png, tmp_path):
+    saved = []
+    answer = '[{"bbox": [-50, -20, 5000, 5000], "category": "Text", "text": "весь лист"}]'
+    monkeypatch.setattr(pipeline_vlm.vlm_client, "chat", lambda *a, **k: answer)
+    monkeypatch.setattr(pipeline_vlm, "_save_crop", lambda crop, path: saved.append(crop.shape))
+    out = tmp_path / "out"
+
+    events, good, review = _run(one_png, out)
+
+    assert good == 1
+    # 300x200 png → кроп зажат в границы страницы, без обёртки отрицательных индексов
+    assert saved == [(200, 300, 3)]
+
+
 def test_pdf_pages_are_rasterised_and_processed(monkeypatch, tmp_path):
     Image.new("RGB", (300, 200), "white").save(tmp_path / "doc.pdf")
     monkeypatch.setattr(pipeline_vlm.vlm_client, "chat", lambda *a, **k: _DOTS_ANSWER)

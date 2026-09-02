@@ -78,6 +78,13 @@ VLM_ENGINE_META = {
 # VLM на CPU отвечают минутами, не секундами (Folio-OCR: OCR_REQUEST_TIMEOUT_MS
 # =300000) — отдельно от ENGINE_CALL_TIMEOUT_SECONDS=30 классического пути.
 VLM_REQUEST_TIMEOUT_SECONDS = 300
+# Пинг /v1/models для health-check (backend/models_status.py) — короткий,
+# т.к. дергается для всех VLM-движков на каждый GET /models/status.
+VLM_HEALTHCHECK_TIMEOUT_SECONDS = 3
+# Потолок токенов ответа модели. Полностраничные native-стратегии (dots.ocr,
+# HunyuanOCR) отдают всю страницу за один ответ — на плотной A4 4096 токенов
+# обрезали бы нижние строки без всякого сигнала.
+VLM_MAX_OUTPUT_TOKENS = 8192
 # Согласование боксов между несколькими VLM: сколько движков должны отдать
 # совпадающий по IoU бокс с одинаковым текстом (аналог min_agree, но по боксам,
 # а не по score — VLM per-line confidence не дают).

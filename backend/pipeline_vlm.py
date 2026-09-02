@@ -41,6 +41,22 @@ def _cancelled(should_cancel: Optional[Callable[[], bool]]) -> bool:
     return bool(should_cancel and should_cancel())
 
 
+def _crop_by_bbox(numpy_image: np.ndarray, poly) -> np.ndarray:
+    """Вырезает кроп по bbox полигона, зажимая координаты в границы страницы.
+
+    Координаты приходят из свободного вывода VLM (спот-регекс, промилле,
+    округление) и бывают отрицательными / за краем — без clamp отрицательный
+    старт в numpy-срезе трактуется как индекс с конца и даёт кроп не с того
+    места страницы."""
+    height, width = numpy_image.shape[:2]
+    x0, y0, x1, y1 = vlm_consensus.polygon_bbox(poly)
+    x0 = max(0, min(int(x0), width))
+    x1 = max(0, min(int(x1), width))
+    y0 = max(0, min(int(y0), height))
+    y1 = max(0, min(int(y1), height))
+    return numpy_image[y0:y1, x0:x1]
+
+
 def _engine_lines(
     engine: str,
     numpy_image: np.ndarray,
@@ -64,8 +80,7 @@ def _engine_lines(
         for poly in region_boxes:
             if _cancelled(should_cancel):
                 break
-            x0, y0, x1, y1 = vlm_consensus.polygon_bbox(poly)
-            crop = numpy_image[int(y0) : int(y1), int(x0) : int(x1)]
+            crop = _crop_by_bbox(numpy_image, poly)
             if crop.shape[0] <= MIN_CROP_PIX or crop.shape[1] <= MIN_CROP_PIX:
                 continue
             raw = vlm_client.chat(engine, vlm_adapters.PROMPTS[engine], crop)
@@ -105,7 +120,14 @@ def _process_page(
     for engine in vlm_engines:
         if _cancelled(should_cancel):
             return
-        lines = _engine_lines(engine, numpy_image, source_label, on_error, should_cancel)
+        try:
+            lines = _engine_lines(engine, numpy_image, source_label, on_error, should_cancel)
+        except Exception as e:  # noqa: BLE001 — движок не валит страницу
+            msg = f"{engine}: ошибка обработки — {source_label}: {e}"
+            print(msg)
+            if on_error:
+                on_error(msg)
+            lines = None
         if lines is not None:
             page_lines[engine] = lines
 
@@ -118,8 +140,7 @@ def _process_page(
             return
         try:
             bucket, text, engine, diverged = vlm_consensus.resolve(group, vlm_min_agree)
-            x0, y0, x1, y1 = vlm_consensus.polygon_bbox(group["poly"])
-            crop = numpy_image[int(y0) : int(y1), int(x0) : int(x1)]
+            crop = _crop_by_bbox(numpy_image, group["poly"])
             if crop.shape[0] <= MIN_CROP_PIX or crop.shape[1] <= MIN_CROP_PIX:
                 continue
 

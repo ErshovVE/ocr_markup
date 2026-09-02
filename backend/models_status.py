@@ -21,7 +21,11 @@ from typing import Dict, Optional
 
 from platformdirs import user_cache_dir
 
-from backend.config import VLM_ENGINE_META, VLM_ENGINES
+from backend.config import (
+    VLM_ENGINE_META,
+    VLM_ENGINES,
+    VLM_HEALTHCHECK_TIMEOUT_SECONDS,
+)
 
 PADDLE_MODEL_NAMES = {
     "paddle": "cyrillic_PP-OCRv5_mobile_rec",
@@ -79,7 +83,9 @@ def check_vlm_endpoint(engine_id: str) -> ModelState:
     try:
         import httpx
 
-        response = httpx.get(f"{endpoint.rstrip('/')}/v1/models", timeout=5)
+        response = httpx.get(
+            f"{endpoint.rstrip('/')}/v1/models", timeout=VLM_HEALTHCHECK_TIMEOUT_SECONDS
+        )
         response.raise_for_status()
     except Exception as e:
         return ModelState("error", f"Недоступен {endpoint}: {e}")
@@ -113,7 +119,11 @@ def _paddle_weights_on_disk(model_name: str) -> bool:
     return model_dir.is_dir() and any(model_dir.iterdir())
 
 
-def get_status() -> Dict[str, ModelState]:
+def get_status(include_vlm: bool = True) -> Dict[str, ModelState]:
+    """Статус всех движков. include_vlm=False пропускает сетевые пинги
+    VLM-endpoint'ов — нужно на классическом пути (_readiness_warnings в
+    backend/main.py), чтобы обычный /run не платил за проверку 5 внешних
+    сервисов, которые ему не нужны."""
     with _lock:
         snapshot = dict(_state)
     snapshot["tesseract"] = check_tesseract()
@@ -123,8 +133,9 @@ def get_status() -> Dict[str, ModelState]:
     for key, model_type in SURYA_MODEL_TYPES.items():
         if snapshot[key].status == "not_checked" and _surya_weights_on_disk(model_type):
             snapshot[key] = ModelState("ready", "Найдено в кэше на диске")
-    for engine_id in VLM_ENGINES:
-        snapshot[f"vlm_{engine_id}"] = check_vlm_endpoint(engine_id)
+    if include_vlm:
+        for engine_id in VLM_ENGINES:
+            snapshot[f"vlm_{engine_id}"] = check_vlm_endpoint(engine_id)
     return snapshot
 
 

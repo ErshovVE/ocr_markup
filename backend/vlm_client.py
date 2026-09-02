@@ -24,6 +24,7 @@ from PIL import Image
 from backend.config import (
     VLM_ENGINE_META,
     VLM_MAX_IMAGE_SIDE,
+    VLM_MAX_OUTPUT_TOKENS,
     VLM_REQUEST_TIMEOUT_SECONDS,
 )
 
@@ -83,7 +84,7 @@ def chat(engine_id: str, prompt: str, image) -> str:
                 }
             ],
             "temperature": 0.0,
-            "max_tokens": 4096,
+            "max_tokens": VLM_MAX_OUTPUT_TOKENS,
         }
         response = _client().post(f"{endpoint}/v1/chat/completions", json=payload)
         response.raise_for_status()

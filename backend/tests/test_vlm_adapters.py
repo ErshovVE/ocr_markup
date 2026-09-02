@@ -38,6 +38,25 @@ def test_parse_dotsocr_returns_empty_on_broken_json():
     assert vlm_adapters.parse_dotsocr("это не json") == []
 
 
+def test_parse_dotsocr_skips_item_with_non_numeric_bbox_without_raising():
+    raw = (
+        '[{"bbox": [1, null, 3, 4], "text": "битый"}, ' '{"bbox": [0, 0, 20, 20], "text": "целый"}]'
+    )
+
+    lines = vlm_adapters.parse_dotsocr(raw)
+
+    assert [text for _, text in lines] == ["целый"]
+
+
+def test_parse_dispatcher_swallows_unexpected_parser_error(monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("parser blew up")
+
+    monkeypatch.setattr(vlm_adapters, "parse_dotsocr", boom)
+
+    assert vlm_adapters.parse("dots_ocr", "{}") == []
+
+
 def test_parse_unlimited_ocr_reads_ref_box_tokens():
     raw = "<ref>заголовок</ref><box>(12,34),(210,60)</box> прочее"
 

@@ -149,7 +149,11 @@ def parse_dotsocr(raw: str, image_w: int = 0, image_h: int = 0) -> List[Tuple[Po
         text = (item.get("text") or "").strip()
         if not text or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
             continue
-        lines.append((rect_polygon(*(float(v) for v in bbox)), text))
+        try:
+            corners = [float(v) for v in bbox]
+        except (TypeError, ValueError):
+            continue
+        lines.append((rect_polygon(*corners), text))
     return lines
 
 
@@ -178,18 +182,21 @@ def parse_unlimited_ocr(raw: str, image_w: int = 0, image_h: int = 0) -> List[Tu
 
 def _coerce_bbox(item):
     """bbox элемента → (x0, y0, x1, y1) в пикселях; поддерживает [x1,y1,x2,y2]
-    и полигон [[x,y], ...]. Иначе None."""
+    и полигон [[x,y], ...]. Битый bbox → None (не исключение)."""
     bbox = item.get("bbox") or item.get("box") or item.get("poly")
-    if (
-        isinstance(bbox, (list, tuple))
-        and len(bbox) == 4
-        and all(isinstance(v, (int, float)) for v in bbox)
-    ):
-        return tuple(float(v) for v in bbox)
-    if isinstance(bbox, (list, tuple)) and bbox and isinstance(bbox[0], (list, tuple)):
-        xs = [float(p[0]) for p in bbox]
-        ys = [float(p[1]) for p in bbox]
-        return min(xs), min(ys), max(xs), max(ys)
+    try:
+        if (
+            isinstance(bbox, (list, tuple))
+            and len(bbox) == 4
+            and all(isinstance(v, (int, float)) for v in bbox)
+        ):
+            return tuple(float(v) for v in bbox)
+        if isinstance(bbox, (list, tuple)) and bbox and isinstance(bbox[0], (list, tuple)):
+            xs = [float(p[0]) for p in bbox]
+            ys = [float(p[1]) for p in bbox]
+            return min(xs), min(ys), max(xs), max(ys)
+    except (TypeError, ValueError, IndexError):
+        return None
     return None
 
 
@@ -210,12 +217,18 @@ def parse_paddleocr_vl(raw: str, image_w: int = 0, image_h: int = 0) -> List[Tup
             text = (text or "").strip()
             if not text or not isinstance(poly, (list, tuple)) or not poly:
                 continue
-            if isinstance(poly[0], (list, tuple)):
-                xs = [float(p[0]) for p in poly]
-                ys = [float(p[1]) for p in poly]
-                lines.append((rect_polygon(min(xs), min(ys), max(xs), max(ys)), text))
-            elif len(poly) == 4:
-                lines.append((rect_polygon(*(float(v) for v in poly)), text))
+            try:
+                if isinstance(poly[0], (list, tuple)):
+                    xs = [float(p[0]) for p in poly]
+                    ys = [float(p[1]) for p in poly]
+                    rect = (min(xs), min(ys), max(xs), max(ys))
+                elif len(poly) == 4:
+                    rect = tuple(float(v) for v in poly)
+                else:
+                    continue
+            except (TypeError, ValueError, IndexError):
+                continue
+            lines.append((rect_polygon(*rect), text))
         return lines
 
     if isinstance(data, list):
@@ -243,15 +256,23 @@ def parse_glm_ocr(raw: str) -> List[str]:
 
 
 def parse(engine_id: str, raw: str, image_w: int = 0, image_h: int = 0):
-    """Диспетчер: сырой ответ движка → [(полигон, текст)] (для glm_ocr — [str])."""
-    if engine_id == "hunyuan_ocr":
-        return parse_hunyuan_spotting(raw, image_w, image_h)
-    if engine_id == "dots_ocr":
-        return parse_dotsocr(raw, image_w, image_h)
-    if engine_id == "unlimited_ocr":
-        return parse_unlimited_ocr(raw, image_w, image_h)
-    if engine_id == "paddleocr_vl":
-        return parse_paddleocr_vl(raw, image_w, image_h)
-    if engine_id == "glm_ocr":
-        return parse_glm_ocr(raw)
+    """Диспетчер: сырой ответ движка → [(полигон, текст)] (для glm_ocr — [str]).
+
+    Последний рубеж: любую неожиданную ошибку парсера гасим в ``[]`` + ``print``
+    (как recognize_* в backend/recognizers.py) — битый ответ модели не должен
+    ронять страницу/весь job (см. backend/pipeline_vlm.py)."""
+    parsers = {
+        "hunyuan_ocr": parse_hunyuan_spotting,
+        "dots_ocr": parse_dotsocr,
+        "unlimited_ocr": parse_unlimited_ocr,
+        "paddleocr_vl": parse_paddleocr_vl,
+    }
+    try:
+        if engine_id in parsers:
+            return parsers[engine_id](raw, image_w, image_h)
+        if engine_id == "glm_ocr":
+            return parse_glm_ocr(raw)
+    except Exception as e:  # noqa: BLE001
+        print(f"Ошибка парсера VLM {engine_id}: {e}")
+        return []
     return []

@@ -29,7 +29,7 @@ def _readiness_warnings(req: "RunRequest") -> List[str]:
     """Предупреждения о неготовых моделях перед стартом job'а — раньше /run
     просто стартовал вслепую, и первая же строка могла "молча" зависнуть на
     скачивании гигабайтных весов без единого объяснения в UI."""
-    status = models_status.get_status()
+    status = models_status.get_status(include_vlm=req.mode == "vlm")
     warnings: List[str] = []
 
     def check(key: str, label: str) -> None:
@@ -59,6 +59,7 @@ def _readiness_warnings(req: "RunRequest") -> List[str]:
     if det_key:
         check(det_key, "Детектор строк")
     return warnings
+
 
 # Локальный однопользовательский сервис без аутентификации (см. backend/README.md) —
 # входные пути не ограничены заранее известным корнем намеренно, так как

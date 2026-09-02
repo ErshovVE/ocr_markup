@@ -100,6 +100,12 @@ def test_get_status_exposes_vlm_keys(monkeypatch):
     assert {"vlm_dots_ocr", "vlm_glm_ocr", "vlm_paddleocr_vl"} <= set(status)
 
 
+def test_get_status_skips_vlm_probes_when_not_requested():
+    with patch("httpx.get", side_effect=AssertionError("should not be called")):
+        status = models_status.get_status(include_vlm=False)
+    assert not any(k.startswith("vlm_") for k in status)
+
+
 def test_prepare_rejects_vlm_models():
     with pytest.raises(ValueError):
         models_status.prepare("vlm_dots_ocr")
