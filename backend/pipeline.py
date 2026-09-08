@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import threading
@@ -32,6 +33,36 @@ from backend.recognizers import (
 
 MIN_CROP_PIX = 10
 
+# Потолок против decompression-bomb для картинок из произвольного input_dir
+# (глобально на процесс). За 2× порога — Image.DecompressionBombError, его
+# ловят per-file try/except и рапортуют через on_error, не роняя job.
+Image.MAX_IMAGE_PIXELS = 64_000_000
+
+logger = logging.getLogger(__name__)
+
+# recognize_* каждого движка ходят в один общий module-level предиктор
+# (backend/recognizers.py::_Engines) — он не thread-safe. Пер-движковый лок
+# гарантирует, что даже когда прошлый вызов завис и его поток брошен (см.
+# ниже), следующий вызов того же движка НЕ войдёт в предиктор параллельно:
+# он подождёт лок до дедлайна и, не дождавшись, вернёт ("", 0.0).
+_ENGINE_LOCKS: Dict[str, threading.Lock] = {
+    "paddle": threading.Lock(),
+    "surya": threading.Lock(),
+    "tesseract": threading.Lock(),
+}
+# После скольких таймаутов ПОДРЯД считать движок зависшим и снять его с
+# расписания до конца job'а (иначе каждая строка большой папки платит полный
+# ENGINE_CALL_TIMEOUT_SECONDS впустую, а брошенные потоки копятся).
+_MAX_ENGINE_TIMEOUT_STREAK = 3
+_engine_timeout_streak: Dict[str, int] = {}
+_engine_disabled: set = set()
+
+
+def reset_engine_guard() -> None:
+    """Сбрасывает счётчики зависаний движков — вызывается в начале run()."""
+    _engine_timeout_streak.clear()
+    _engine_disabled.clear()
+
 
 def _run_engines_with_timeout(
     calls: Dict[str, Tuple[Callable, tuple]],
@@ -55,12 +86,22 @@ def _run_engines_with_timeout(
     Дедлайн общий на все calls (а не «до timeout» на каждый по очереди), иначе
     при нескольких одновременно медленных движках суммарное ожидание строки
     росло бы до len(calls) * timeout вместо timeout.
+
+    Движок (paddle/surya/tesseract), зависший _MAX_ENGINE_TIMEOUT_STREAK раз
+    подряд, до конца job'а больше не запускается (reset_engine_guard() в
+    начале run()).
     """
+    active = {name: spec for name, spec in calls.items() if name not in _engine_disabled}
     result_box: Dict[str, Tuple[str, float]] = {}
 
     def make_target(name: str, fn: Callable, args: tuple):
         def target() -> None:
-            result_box[name] = fn(*args)
+            lock = _ENGINE_LOCKS.get(name)
+            if lock is None:
+                result_box[name] = fn(*args)
+                return
+            with lock:
+                result_box[name] = fn(*args)
 
         return target
 
@@ -68,23 +109,38 @@ def _run_engines_with_timeout(
         name: threading.Thread(
             target=make_target(name, fn, args), daemon=True, name=f"ocr-engine-{name}"
         )
-        for name, (fn, args) in calls.items()
+        for name, (fn, args) in active.items()
     }
     for thread in threads.values():
         thread.start()
 
     deadline = time.monotonic() + timeout
-    results: Dict[str, Tuple[str, float]] = {}
+    results: Dict[str, Tuple[str, float]] = {name: ("", 0.0) for name in calls}
     for name, thread in threads.items():
         remaining = max(0.0, deadline - time.monotonic())
         thread.join(remaining)
         if thread.is_alive():
             msg = f"Таймаут {timeout}с у движка {name}: {source_label}"
-            print(msg)
+            logger.warning(msg)
             if on_error:
                 on_error(msg)
+            # Гвардия «отключить зависший движок» — только для реальных движков;
+            # произвольные имена из юнит-тестов примитива не копят состояние.
+            if name in _ENGINE_LOCKS:
+                _engine_timeout_streak[name] = _engine_timeout_streak.get(name, 0) + 1
+                if _engine_timeout_streak[name] >= _MAX_ENGINE_TIMEOUT_STREAK:
+                    _engine_disabled.add(name)
+                    disabled_msg = (
+                        f"Движок {name} завис {_MAX_ENGINE_TIMEOUT_STREAK} раз подряд — "
+                        "отключён до конца задания, перезапустите backend"
+                    )
+                    logger.error(disabled_msg)
+                    if on_error:
+                        on_error(disabled_msg)
             results[name] = ("", 0.0)
         else:
+            if name in _ENGINE_LOCKS:
+                _engine_timeout_streak[name] = 0
             results[name] = result_box.get(name, ("", 0.0))
     return results
 
@@ -243,7 +299,7 @@ def _process_boxes(
                         f"(перевод строки в ответе {', '.join(multiline_engines)}): "
                         f"{source_label} — строка пропущена"
                     )
-                    print(msg)
+                    logger.warning(msg)
                     if on_error:
                         on_error(msg)
                     continue
@@ -269,7 +325,7 @@ def _process_boxes(
                 )
         except Exception as e:
             msg = f"Ошибка распознавания строки в {source_label}: {e}"
-            print(msg)
+            logger.warning(msg)
             if on_error:
                 on_error(msg)
             continue
@@ -314,72 +370,120 @@ def _process_pdf(
             page = pdf_doc[page_index]
             source_label = f"{file_path} (страница {page_index + 1})"
             try:
-                numpy_image = pdf_extract.render_page(page)
-            except Exception as e:
-                msg = f"Ошибка рендеринга {source_label}: {e}"
-                print(msg)
-                if on_error:
-                    on_error(msg)
-                continue
-
-            if use_text_layer:
-                try:
-                    if not pdf_extract.page_has_text_layer(page):
-                        continue
-                    image_height, image_width = numpy_image.shape[:2]
-                    boxes_text = pdf_extract.extract_page_text_boxes(
-                        page, image_width, image_height
-                    )
-                except Exception as e:
-                    msg = f"Ошибка извлечения текстового слоя {source_label}: {e}"
-                    print(msg)
-                    if on_error:
-                        on_error(msg)
-                    continue
-
-                for box, text in boxes_text:
-                    try:
-                        bx0, by0 = box[0]
-                        bx2, by2 = box[2]
-                        img_crop = numpy_image[int(by0) : int(by2), int(bx0) : int(bx2)]
-                        if img_crop.shape[0] <= MIN_CROP_PIX or img_crop.shape[1] <= MIN_CROP_PIX:
-                            continue
-                        crop_relative, crop_absolute = allocate_crop_path()
-                        _save_crop(img_crop, crop_absolute)
-                        write_line("good", f"{crop_relative}\t{text}\n")
-                        if on_line_done:
-                            on_line_done("good", False)
-                    except Exception as e:
-                        msg = f"Ошибка сохранения строки в {source_label}: {e}"
-                        print(msg)
-                        if on_error:
-                            on_error(msg)
-                        continue
-            else:
-                image = Image.fromarray(numpy_image)
-                boxes = get_detector().detect(numpy_image)
-                _process_boxes(
-                    image,
-                    numpy_image,
-                    boxes,
+                _process_pdf_page(
+                    page,
+                    source_label,
+                    use_text_layer,
+                    get_detector,
                     threshold,
                     preferred_model,
                     lang,
                     latin_model_size,
                     tesseract_lang,
-                    source_label,
                     write_line,
                     allocate_crop_path,
                     on_line_done,
-                    on_error=on_error,
-                    should_cancel=should_cancel,
-                    write_debug=write_debug,
-                    engines=engines,
-                    min_agree=min_agree,
-                    detector_engine=detector_engine,
+                    on_error,
+                    should_cancel,
+                    write_debug,
+                    engines,
+                    min_agree,
+                    detector_engine,
                 )
+            finally:
+                # Явно закрываем per-page нативные буферы pdfium сразу, а не
+                # копим их до pdf_doc.close() в конце файла (implicit-close
+                # warnings на больших PDF).
+                page.close()
     finally:
         pdf_doc.close()
+
+
+def _process_pdf_page(
+    page,
+    source_label: str,
+    use_text_layer: bool,
+    get_detector: Callable[[], Detector],
+    threshold: float,
+    preferred_model: Optional[str],
+    lang: str,
+    latin_model_size: str,
+    tesseract_lang: str,
+    write_line: Callable[[str, str], None],
+    allocate_crop_path: Callable[[], Tuple[str, str]],
+    on_line_done: Optional[Callable[[str, bool], None]],
+    on_error: Optional[Callable[[str], None]],
+    should_cancel: Optional[Callable[[], bool]],
+    write_debug: Optional[Callable[[dict], None]],
+    engines: List[str],
+    min_agree: int,
+    detector_engine: str,
+) -> None:
+    """Обрабатывает одну страницу PDF (см. _process_pdf) — текстовый слой либо
+    OCR-консенсус растровой страницы."""
+    try:
+        numpy_image = pdf_extract.render_page(page)
+    except Exception as e:
+        msg = f"Ошибка рендеринга {source_label}: {e}"
+        logger.warning(msg)
+        if on_error:
+            on_error(msg)
+        return
+
+    if use_text_layer:
+        try:
+            if not pdf_extract.page_has_text_layer(page):
+                return
+            image_height, image_width = numpy_image.shape[:2]
+            boxes_text = pdf_extract.extract_page_text_boxes(page, image_width, image_height)
+        except Exception as e:
+            msg = f"Ошибка извлечения текстового слоя {source_label}: {e}"
+            logger.warning(msg)
+            if on_error:
+                on_error(msg)
+            return
+
+        for box, text in boxes_text:
+            try:
+                bx0, by0 = box[0]
+                bx2, by2 = box[2]
+                img_crop = numpy_image[int(by0) : int(by2), int(bx0) : int(bx2)]
+                if img_crop.shape[0] <= MIN_CROP_PIX or img_crop.shape[1] <= MIN_CROP_PIX:
+                    continue
+                crop_relative, crop_absolute = allocate_crop_path()
+                _save_crop(img_crop, crop_absolute)
+                write_line("good", f"{crop_relative}\t{text}\n")
+                if on_line_done:
+                    on_line_done("good", False)
+            except Exception as e:
+                msg = f"Ошибка сохранения строки в {source_label}: {e}"
+                logger.warning(msg)
+                if on_error:
+                    on_error(msg)
+                continue
+    else:
+        image = Image.fromarray(numpy_image)
+        boxes = get_detector().detect(numpy_image)
+        _process_boxes(
+            image,
+            numpy_image,
+            boxes,
+            threshold,
+            preferred_model,
+            lang,
+            latin_model_size,
+            tesseract_lang,
+            source_label,
+            write_line,
+            allocate_crop_path,
+            on_line_done,
+            on_error=on_error,
+            should_cancel=should_cancel,
+            write_debug=write_debug,
+            engines=engines,
+            min_agree=min_agree,
+            detector_engine=detector_engine,
+        )
 
 
 def run(
@@ -440,7 +544,9 @@ def run(
     останавливается на ближайшей проверке, не теряя уже записанное.
     """
     os.makedirs(output_dir, exist_ok=True)
+    reset_engine_guard()
 
+    tesseract_lang = "rus" if lang == "ru" else "eng"
     detector: Optional[Detector] = None
 
     def get_detector() -> Detector:
@@ -459,7 +565,6 @@ def run(
     if on_found:
         on_found(len(matched_files) + len(pdf_files))
 
-    tesseract_lang = "rus" if lang == "ru" else "eng"
     good_count = 0
     review_count = 0
     img_count = _resume_img_count(output_dir)
@@ -499,7 +604,7 @@ def run(
                 boxes = get_detector().detect(numpy_image)
             except Exception as e:
                 msg = f"Ошибка обработки файла {file_path}: {e}"
-                print(msg)
+                logger.warning(msg)
                 if on_error:
                     on_error(msg)
                 if on_file_done:
@@ -554,7 +659,7 @@ def run(
                 )
             except Exception as e:
                 msg = f"Ошибка обработки файла {file_path}: {e}"
-                print(msg)
+                logger.warning(msg)
                 if on_error:
                     on_error(msg)
                 if on_file_done:

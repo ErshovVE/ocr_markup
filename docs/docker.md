@@ -23,10 +23,17 @@ docker compose up --build
 - Frontend: http://localhost:8501
 - Backend: http://localhost:8756 (see `backend/README.md` for the API reference)
 
+All published ports are bound to `127.0.0.1` (see the note at the top of
+`docker-compose.yml`): the backend has no authentication and the frontend runs
+with XSRF protection disabled, so neither may be reachable from the LAN. Other
+hosts on your network cannot reach them; only this machine can.
+
 Both services mount `./data` (create this folder on the host and put your
 working directory with images/annotations there) at `/data` inside the
 container — this is the only way to pass real files into the container,
-since the apps have no access to the rest of the host filesystem.
+since the apps have no access to the rest of the host filesystem. The backend
+also sets `OCR_DATA_ROOT=/data`, so `POST /run` rejects `input_dir`/`output_dir`
+that resolve outside `/data`.
 
 `backend` additionally uses the named volumes `paddleocr-models`/`surya-models`
 so PaddleOCR/SuryaOCR models are downloaded once and survive container
@@ -94,14 +101,20 @@ docker run --rm -p 8756:8756 -v "$(pwd)/data:/data" ocr-markup-backend
 
 ## Important
 
+- Published ports bind to `127.0.0.1` only (see above). If you change that in
+  `docker-compose.yml`, you expose an unauthenticated backend and an
+  XSRF-disabled Streamlit to the whole network — don't, unless you know
+  exactly what you're doing.
 - The backend is an unauthenticated spike that accepts an arbitrary
   `input_dir`/`output_dir` in the request body (see `backend/README.md`).
-  Inside the container those paths are constrained by the mounted volumes,
-  but don't unnecessarily point the `docker run`/`docker compose` `volumes`
-  section at production data.
+  `OCR_DATA_ROOT=/data` (set in `docker-compose.yml`) confines them to the
+  mounted volume; don't unnecessarily point the `volumes` section at
+  production data.
 - The backend image is heavy (PaddleOCR + SuryaOCR + system Tesseract) — the
   first build and first run (downloading ML models) can take a while.
+- VLM companion images (`vlm-cpu`/`vlm-gpu` profiles) use floating tags and
+  `--trust-remote-code`; pin digests/revisions before relying on them (see the
+  comment block in `docker-compose.yml`).
 - The frontend image doesn't include `predict.py`/`predict.ipynb` or the
-  PyInstaller wiring (`frontend/wrapper.py`, `frontend/pyinst_command.txt`,
-  `frontend/build_exe.py`, `frontend/requirements-build.txt`) — they aren't
-  part of running the app.
+  PyInstaller wiring (`frontend/wrapper.py`, `frontend/build_exe.py`,
+  `frontend/requirements-build.txt`) — they aren't part of running the app.

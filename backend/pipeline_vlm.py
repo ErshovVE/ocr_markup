@@ -13,9 +13,14 @@ backend/jobs.py выбирает run_fn по mode без ветвления по
 Формат строк good.txt/needs_review.txt (``{crop_rel}\\t{text}\\n``) и записей
 debug.jsonl — идентичен классическому, только score всегда 1.0 (VLM per-line
 confidence не дают).
+
+Страница приводится к <= VLM_MAX_IMAGE_SIDE один раз в _process_page
+(vlm_client.downscale_page) — модель, парсер боксов и вырезание кропа
+работают в одной системе координат.
 """
 
 import json
+import logging
 import os
 from glob import glob
 from typing import Callable, Dict, List, Optional, Tuple
@@ -33,6 +38,8 @@ from backend.config import (
     VLM_ENGINE_META,
 )
 from backend.pipeline import MIN_CROP_PIX, _crop_paths, _resume_img_count, _save_crop
+
+logger = logging.getLogger(__name__)
 
 PageLines = Dict[str, List[Tuple[list, str]]]
 
@@ -74,7 +81,7 @@ def _engine_lines(
         try:
             region_boxes = vlm_layout.merged_region_boxes(numpy_image)
         except Exception as e:  # noqa: BLE001 — детектор свои исключения не гасит
-            print(f"Ошибка layout-детекции {engine}: {source_label} — {e}")
+            logger.warning("Ошибка layout-детекции %s: %s — %s", engine, source_label, e)
             region_boxes = []
         lines: List[Tuple[list, str]] = []
         for poly in region_boxes:
@@ -102,6 +109,33 @@ def _engine_lines(
     return lines
 
 
+def _dedup_groups(groups: List[Dict], vlm_min_agree: int) -> List[Dict]:
+    """Убирает дубликаты строк внутри страницы: при vlm_min_agree=1 (дефолт)
+    и нескольких движках несопоставленный по IoU бокс становится своей
+    группой, и одна и та же физическая строка уходит в good.txt 2-3 раза с
+    почти одинаковыми кропами. Схлопываем группы с идентичным (после
+    postprocess) текстом-победителем и пересекающимися боксами."""
+    kept: List[Dict] = []
+    seen: List[Tuple[Tuple[int, int, int, int], str]] = []
+    for group in groups:
+        _, text, _, _ = vlm_consensus.resolve(group, vlm_min_agree)
+        bbox = vlm_consensus.polygon_bbox(group["poly"])
+        if text and any(
+            text == prev_text and vlm_consensus.iou(group["poly"], _bbox_poly(prev_bbox)) > 0
+            for prev_bbox, prev_text in seen
+        ):
+            continue
+        kept.append(group)
+        if text:
+            seen.append((bbox, text))
+    return kept
+
+
+def _bbox_poly(bbox: Tuple[int, int, int, int]) -> list:
+    x0, y0, x1, y1 = bbox
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+
 def _process_page(
     numpy_image: np.ndarray,
     source_label: str,
@@ -115,7 +149,11 @@ def _process_page(
     should_cancel: Optional[Callable[[], bool]],
     write_debug: Optional[Callable[[dict], None]],
 ) -> None:
-    """Прогоняет одну страницу через выбранные VLM и пишет строки результата."""
+    """Прогоняет одну страницу через выбранные VLM и пишет строки результата.
+
+    Страница один раз приводится к <= VLM_MAX_IMAGE_SIDE — дальше боксы от
+    моделей и вырезание кропов идут в этом же пространстве."""
+    numpy_image = vlm_client.downscale_page(numpy_image)
     page_lines: PageLines = {}
     for engine in vlm_engines:
         if _cancelled(should_cancel):
@@ -124,7 +162,7 @@ def _process_page(
             lines = _engine_lines(engine, numpy_image, source_label, on_error, should_cancel)
         except Exception as e:  # noqa: BLE001 — движок не валит страницу
             msg = f"{engine}: ошибка обработки — {source_label}: {e}"
-            print(msg)
+            logger.warning(msg)
             if on_error:
                 on_error(msg)
             lines = None
@@ -135,6 +173,7 @@ def _process_page(
         return
 
     groups = vlm_consensus.group_by_iou(page_lines, iou_threshold)
+    groups = _dedup_groups(groups, vlm_min_agree)
     for group in groups:
         if _cancelled(should_cancel):
             return
@@ -163,10 +202,58 @@ def _process_page(
                 )
         except Exception as e:  # noqa: BLE001 — как _process_boxes: строка не валит job
             msg = f"Ошибка записи строки в {source_label}: {e}"
-            print(msg)
+            logger.warning(msg)
             if on_error:
                 on_error(msg)
             continue
+
+
+def _process_pdf(
+    file_path: str,
+    vlm_engines: List[str],
+    vlm_min_agree: int,
+    iou_threshold: float,
+    write_line: Callable[[str, str], None],
+    allocate_crop_path: Callable[[], Tuple[str, str]],
+    on_line_done: Optional[Callable[[str, bool], None]],
+    on_error: Optional[Callable[[str], None]],
+    should_cancel: Optional[Callable[[], bool]],
+    write_debug: Optional[Callable[[dict], None]],
+) -> None:
+    """PDF постранично — всегда в растр (текстовый слой в VLM-режиме не трогаем,
+    см. docs/architecture.md / backend/README.md)."""
+    pdf_doc = pdfium.PdfDocument(file_path)
+    try:
+        for page_index in range(len(pdf_doc)):
+            if _cancelled(should_cancel):
+                break
+            source_label = f"{file_path} (страница {page_index + 1})"
+            page = pdf_doc[page_index]
+            try:
+                numpy_image = pdf_extract.render_page(page)
+            except Exception as e:  # noqa: BLE001
+                msg = f"Ошибка рендеринга {source_label}: {e}"
+                logger.warning(msg)
+                if on_error:
+                    on_error(msg)
+                continue
+            finally:
+                page.close()
+            _process_page(
+                numpy_image,
+                source_label,
+                vlm_engines,
+                vlm_min_agree,
+                iou_threshold,
+                write_line,
+                allocate_crop_path,
+                on_line_done,
+                on_error,
+                should_cancel,
+                write_debug,
+            )
+    finally:
+        pdf_doc.close()
 
 
 def run(
@@ -248,7 +335,7 @@ def run(
                 numpy_image = np.array(Image.open(file_path).convert("RGB"))
             except Exception as e:  # noqa: BLE001
                 msg = f"Ошибка обработки файла {file_path}: {e}"
-                print(msg)
+                logger.warning(msg)
                 if on_error:
                     on_error(msg)
                 if on_file_done:
@@ -289,55 +376,10 @@ def run(
                 )
             except Exception as e:  # noqa: BLE001
                 msg = f"Ошибка обработки файла {file_path}: {e}"
-                print(msg)
+                logger.warning(msg)
                 if on_error:
                     on_error(msg)
             if on_file_done:
                 on_file_done()
 
     return good_count, review_count
-
-
-def _process_pdf(
-    file_path: str,
-    vlm_engines: List[str],
-    vlm_min_agree: int,
-    iou_threshold: float,
-    write_line: Callable[[str, str], None],
-    allocate_crop_path: Callable[[], Tuple[str, str]],
-    on_line_done: Optional[Callable[[str, bool], None]],
-    on_error: Optional[Callable[[str], None]],
-    should_cancel: Optional[Callable[[], bool]],
-    write_debug: Optional[Callable[[dict], None]],
-) -> None:
-    """PDF постранично — всегда в растр (текстовый слой в VLM-режиме не трогаем,
-    см. docs/architecture.md / backend/README.md)."""
-    pdf_doc = pdfium.PdfDocument(file_path)
-    try:
-        for page_index in range(len(pdf_doc)):
-            if _cancelled(should_cancel):
-                break
-            source_label = f"{file_path} (страница {page_index + 1})"
-            try:
-                numpy_image = pdf_extract.render_page(pdf_doc[page_index])
-            except Exception as e:  # noqa: BLE001
-                msg = f"Ошибка рендеринга {source_label}: {e}"
-                print(msg)
-                if on_error:
-                    on_error(msg)
-                continue
-            _process_page(
-                numpy_image,
-                source_label,
-                vlm_engines,
-                vlm_min_agree,
-                iou_threshold,
-                write_line,
-                allocate_crop_path,
-                on_line_done,
-                on_error,
-                should_cancel,
-                write_debug,
-            )
-    finally:
-        pdf_doc.close()

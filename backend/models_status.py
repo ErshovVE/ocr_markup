@@ -1,4 +1,4 @@
-"""Статус готовности движков распознавания (Paddle/Surya/Tesseract).
+"""Статус готовности движков распознавания (Paddle/Surya/Tesseract) и VLM.
 
 Состояние Paddle/Surya хранится в памяти процесса (см. backend/jobs.py) —
 при перезапуске backend'а сбрасывается в "not_checked". Пока оно не было
@@ -8,24 +8,35 @@ docker-compose.yml) — по тому же алгоритму, что испол
 paddlex/surya для решения "уже скачано, докачивать не нужно". Tesseract
 проверяется заново при каждом запросе статуса, т.к. это системный бинарник,
 а не lazy-loaded Python-объект.
+
+VLM-endpoint'ы пингуются конкурентно и с коротким TTL-кэшем: GET /models/status
+дергается фронтендом по таймеру, а 5 последовательных внешних HTTP-пингов
+блокировали бы воркер на секунды на каждый запрос.
 """
 
 import json
+import logging
 import os
 import shutil
 import subprocess
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
+import httpx
 from platformdirs import user_cache_dir
 
 from backend.config import (
     VLM_ENGINE_META,
     VLM_ENGINES,
     VLM_HEALTHCHECK_TIMEOUT_SECONDS,
+    VLM_STATUS_CACHE_TTL_SECONDS,
 )
+
+logger = logging.getLogger(__name__)
 
 PADDLE_MODEL_NAMES = {
     "paddle": "cyrillic_PP-OCRv5_mobile_rec",
@@ -35,6 +46,13 @@ SURYA_MODEL_TYPES = {
     "surya": "text_recognition",
     "surya_detector": "text_detection",
 }
+
+
+def _resolve_tesseract() -> Optional[str]:
+    """Путь к бинарнику tesseract: приоритет у явного TESSERACT_CMD, иначе
+    резолвим через PATH. Явный путь убирает риск PATH/CWD-hijack (на Windows
+    shutil.which исторически смотрел в текущий каталог)."""
+    return os.environ.get("TESSERACT_CMD") or shutil.which("tesseract")
 
 
 @dataclass
@@ -50,12 +68,20 @@ _state: Dict[str, ModelState] = {
     "surya_detector": ModelState(),
 }
 _lock = threading.Lock()
+# Отдельный лок на ленивую конструкцию тяжёлых движков в _prepare — _lock
+# защищает только _state, а сами _Engines.* не потокобезопасны при
+# одновременной первой инициализации.
+_prepare_lock = threading.Lock()
+
+# TTL-кэш пинга VLM-endpoint'ов: {engine_id: (monotonic_ts, ModelState)}.
+_vlm_cache: Dict[str, "tuple[float, ModelState]"] = {}
+_vlm_cache_lock = threading.Lock()
 
 
 def check_tesseract() -> ModelState:
-    binary = shutil.which("tesseract")
+    binary = _resolve_tesseract()
     if not binary:
-        return ModelState("error", "Бинарник tesseract не найден в PATH")
+        return ModelState("error", "Бинарник tesseract не найден (задайте TESSERACT_CMD)")
     try:
         output = subprocess.run(
             [binary, "--list-langs"], capture_output=True, text=True, timeout=5
@@ -67,13 +93,11 @@ def check_tesseract() -> ModelState:
     return ModelState("ready")
 
 
-def check_vlm_endpoint(engine_id: str) -> ModelState:
+def _ping_vlm_endpoint(engine_id: str) -> ModelState:
     """Пинг OpenAI-совместимого сервиса VLM-движка (GET {endpoint}/v1/models).
 
-    В отличие от Paddle/Surya не кэшируется — endpoint (внешний сервис,
-    llama-server / Ollama / vLLM) может подняться или упасть в любой момент,
-    поэтому проверяется заново на каждый запрос статуса, как tesseract.
-    """
+    URL сервиса и текст ошибки наружу не отдаём (M8 в ревью) — только общий
+    статус; детали уходят в лог сервера."""
     meta = VLM_ENGINE_META.get(engine_id)
     if meta is None:
         return ModelState("error", f"Неизвестный VLM-движок: {engine_id}")
@@ -81,15 +105,38 @@ def check_vlm_endpoint(engine_id: str) -> ModelState:
     if not endpoint:
         return ModelState("error", f"{meta['endpoint_env']} не задан")
     try:
-        import httpx
-
         response = httpx.get(
-            f"{endpoint.rstrip('/')}/v1/models", timeout=VLM_HEALTHCHECK_TIMEOUT_SECONDS
+            f"{endpoint.rstrip('/')}/v1/models",
+            timeout=VLM_HEALTHCHECK_TIMEOUT_SECONDS,
+            follow_redirects=False,
         )
         response.raise_for_status()
     except Exception as e:
-        return ModelState("error", f"Недоступен {endpoint}: {e}")
-    return ModelState("ready", endpoint)
+        logger.warning("VLM %s недоступен (%s): %s", engine_id, endpoint, e)
+        return ModelState("error", "эндпоинт недоступен")
+    return ModelState("ready")
+
+
+def check_vlm_endpoint(engine_id: str) -> ModelState:
+    """Кэшированный (TTL VLM_STATUS_CACHE_TTL_SECONDS) пинг VLM-движка."""
+    now = time.monotonic()
+    with _vlm_cache_lock:
+        cached = _vlm_cache.get(engine_id)
+        if cached and now - cached[0] < VLM_STATUS_CACHE_TTL_SECONDS:
+            return cached[1]
+    state = _ping_vlm_endpoint(engine_id)
+    with _vlm_cache_lock:
+        _vlm_cache[engine_id] = (now, state)
+    return state
+
+
+def _check_all_vlm() -> Dict[str, ModelState]:
+    """Пингует все VLM-движки конкурентно (не 5×3с последовательно)."""
+    with ThreadPoolExecutor(max_workers=len(VLM_ENGINES)) as pool:
+        results = pool.map(check_vlm_endpoint, VLM_ENGINES)
+    return {
+        f"vlm_{engine_id}": state for engine_id, state in zip(VLM_ENGINES, results, strict=True)
+    }
 
 
 def _manifest_complete(model_dir: Path) -> bool:
@@ -134,8 +181,7 @@ def get_status(include_vlm: bool = True) -> Dict[str, ModelState]:
         if snapshot[key].status == "not_checked" and _surya_weights_on_disk(model_type):
             snapshot[key] = ModelState("ready", "Найдено в кэше на диске")
     if include_vlm:
-        for engine_id in VLM_ENGINES:
-            snapshot[f"vlm_{engine_id}"] = check_vlm_endpoint(engine_id)
+        snapshot.update(_check_all_vlm())
     return snapshot
 
 
@@ -146,14 +192,15 @@ def _prepare(name: str):
         from backend.detector import _Engines as DetectorEngines
         from backend.recognizers import _Engines as RecognizerEngines
 
-        if name == "paddle":
-            RecognizerEngines.paddle_cyrillic()
-        elif name == "surya":
-            RecognizerEngines.surya_recognition()
-        elif name == "paddle_detector":
-            DetectorEngines.paddle()
-        elif name == "surya_detector":
-            DetectorEngines.surya()
+        with _prepare_lock:
+            if name == "paddle":
+                RecognizerEngines.paddle_cyrillic()
+            elif name == "surya":
+                RecognizerEngines.surya_recognition()
+            elif name == "paddle_detector":
+                DetectorEngines.paddle()
+            elif name == "surya_detector":
+                DetectorEngines.surya()
         with _lock:
             _state[name] = ModelState("ready")
     except Exception as e:

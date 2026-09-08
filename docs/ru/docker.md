@@ -23,10 +23,16 @@ docker compose up --build
 - Frontend: http://localhost:8501
 - Backend: http://localhost:8756 (см. `backend/README.md` за описанием API)
 
+Все published-порты биндятся на `127.0.0.1` (см. комментарий в начале
+`docker-compose.yml`): у бэкенда нет аутентификации, а фронтенд работает с
+выключенной XSRF-защитой — из LAN они недоступны, только с этой машины.
+
 Оба сервиса монтируют `./data` (создайте эту папку на хосте и положите туда
 рабочую директорию с изображениями/разметкой) в `/data` контейнера — это
 единственный способ передать реальные файлы внутрь контейнера, так как
-приложения не имеют доступа к остальной файловой системе хоста.
+приложения не имеют доступа к остальной файловой системе хоста. Бэкенд также
+получает `OCR_DATA_ROOT=/data`, поэтому `POST /run` отклоняет `input_dir`/
+`output_dir` вне `/data`.
 
 `backend` дополнительно использует именованные volume'ы
 `paddleocr-models`/`surya-models`, чтобы модели PaddleOCR/SuryaOCR скачивались
@@ -94,15 +100,20 @@ docker run --rm -p 8756:8756 -v "$(pwd)/data:/data" ocr-markup-backend
 
 ## Важно
 
+- Published-порты биндятся только на `127.0.0.1` (см. выше). Если поменяете это
+  в `docker-compose.yml`, вы откроете всей сети бэкенд без аутентификации и
+  Streamlit с выключенной XSRF — не делайте так без крайней необходимости.
 - Backend — это спайк без аутентификации, который принимает произвольные
-  `input_dir`/`output_dir` в теле запроса (см. `backend/README.md`). Внутри
-  контейнера эти пути ограничены смонтированными volume'ами, но не
-  ограничивайте `docker run`/`docker compose` секцию `volumes` продакшн-данными
+  `input_dir`/`output_dir` в теле запроса (см. `backend/README.md`).
+  `OCR_DATA_ROOT=/data` (задан в `docker-compose.yml`) ограничивает их
+  смонтированным volume'ом; не ограничивайте секцию `volumes` продакшн-данными
   без необходимости.
 - Backend-образ тяжёлый (PaddleOCR + SuryaOCR + системный Tesseract) — первая
   сборка и первый запуск (скачивание ML-моделей) могут занять продолжительное
   время.
+- VLM companion-образы (профили `vlm-cpu`/`vlm-gpu`) используют плавающие теги
+  и `--trust-remote-code`; перед использованием пиньте digest'ы/ревизии (см.
+  блок комментариев в `docker-compose.yml`).
 - Frontend-образ не включает `predict.py`/`predict.ipynb` и
-  PyInstaller-обвязку (`frontend/wrapper.py`, `frontend/pyinst_command.txt`,
-  `frontend/build_exe.py`, `frontend/requirements-build.txt`) — они не
-  участвуют в запуске приложения.
+  PyInstaller-обвязку (`frontend/wrapper.py`, `frontend/build_exe.py`,
+  `frontend/requirements-build.txt`) — они не участвуют в запуске приложения.

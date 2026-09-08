@@ -41,6 +41,7 @@ class AnnotationManager:
             image_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
             resolved_base_dir = self.base_dir.resolve()
 
+            skipped_missing = 0
             for line in lines:
                 if not line.strip():
                     continue
@@ -51,17 +52,28 @@ class AnnotationManager:
 
                 absolute_path = (self.base_dir / relative_path).resolve()
 
-                if (
+                if not absolute_path.is_relative_to(resolved_base_dir):
+                    continue
+                if not (
                     absolute_path.exists()
                     and absolute_path.suffix.lower() in image_extensions
-                    and absolute_path.is_relative_to(resolved_base_dir)
                 ):
-                    img_name = absolute_path.name
-                    self.records[img_name] = ImageRecord(
-                        relative_path=relative_path,
-                        absolute_path=str(absolute_path),
-                        annotation=annotation,
-                    )
+                    # Картинки нет на диске (или это не изображение). Такую
+                    # строку save_changes затем НЕ перезапишет в rec.txt —
+                    # предупреждаем, чтобы «пропажа» строк не была молчаливой.
+                    if relative_path and absolute_path.suffix.lower() in image_extensions:
+                        skipped_missing += 1
+                    continue
+
+                img_name = absolute_path.name
+                self.records[img_name] = ImageRecord(
+                    relative_path=relative_path,
+                    absolute_path=str(absolute_path),
+                    annotation=annotation,
+                )
+
+            if skipped_missing:
+                st.warning(t("rows_skipped_missing_image", count=skipped_missing))
 
             if not self.records:
                 return False, t("no_image_files_found")
@@ -220,9 +232,14 @@ def save_as_handwritten(
     try:
         record = manager.records[img_name]
 
-        # Путь назначения
-        handwritten_root = manager.base_dir / "handwritten_images"
-        dest_path = handwritten_root / record.relative_path
+        # Путь назначения. record.relative_path — сырая строка из rec.txt;
+        # ре-валидируем результат (resolve + вхождение в handwritten_root),
+        # чтобы ".."-сегменты / симлинк не увели copy2 за пределы каталога.
+        handwritten_root = (manager.base_dir / "handwritten_images").resolve()
+        dest_path = (handwritten_root / record.relative_path).resolve()
+        if not dest_path.is_relative_to(handwritten_root):
+            st.error(t("handwritten_save_error", err="недопустимый путь назначения"))
+            return False
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Копируем файл
@@ -231,17 +248,18 @@ def save_as_handwritten(
         # Добавляем в handwritten.txt
         handwritten_txt = manager.base_dir / "handwritten.txt"
         rel_path = f"handwritten_images/{record.relative_path}".replace("\\", "/")
-        new_line = f"{rel_path}\t{annotation}\n"
+        new_line = f"{rel_path}\t{annotation}"
 
-        # Проверяем дубликаты
+        # Проверяем дубликаты — по точному совпадению строки (docs/architecture.md),
+        # а не по подстроке (короткая аннотация могла быть префиксом другой).
         if handwritten_txt.exists():
-            content = handwritten_txt.read_text(encoding="utf-8")
-            if new_line in content:
+            existing = handwritten_txt.read_text(encoding="utf-8").splitlines()
+            if new_line in existing:
                 st.info(t("handwritten_exists"))
                 return True
 
         with open(handwritten_txt, "a", encoding="utf-8") as f:
-            f.write(new_line)
+            f.write(new_line + "\n")
 
         return True
     except Exception as e:

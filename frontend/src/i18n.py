@@ -67,6 +67,8 @@ STRINGS = {
         "no_backups": "Нет бэкапов",
         # annotations.py / backup.py
         "no_image_files_found": "Не удалось найти файлы изображений",
+        "rows_skipped_missing_image": "Пропущено строк (картинки нет на диске): {count} — "
+        "они будут удалены из файла при сохранении",
         "load_error": "Ошибка загрузки: {err}",
         "file_delete_error": "Ошибка удаления файла: {err}",
         "changes_saved": "Изменения сохранены",
@@ -219,6 +221,8 @@ STRINGS = {
         "no_backups": "No backups",
         # annotations.py / backup.py
         "no_image_files_found": "No image files found",
+        "rows_skipped_missing_image": "Rows skipped (image missing on disk): {count} — "
+        "they will be dropped from the file on save",
         "load_error": "Load error: {err}",
         "file_delete_error": "File delete error: {err}",
         "changes_saved": "Changes saved",

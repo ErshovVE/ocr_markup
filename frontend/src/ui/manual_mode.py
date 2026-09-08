@@ -28,7 +28,9 @@ def render_manual_mode():
             st.error(t("dir_not_exist_error"))
             return
 
-        annotation_file = os.path.join(working_dir, uploaded_file.name)
+        # os.path.basename: uploaded_file.name задаётся клиентом; без этого
+        # имя вида "../../evil.txt" увело бы запись save_changes за working_dir.
+        annotation_file = os.path.join(working_dir, os.path.basename(uploaded_file.name))
         manager = AnnotationManager(working_dir, annotation_file)
 
         file_contents = uploaded_file.read().decode("utf-8")
@@ -62,6 +64,6 @@ def render_manual_mode():
         render_image_list(manager, filtered)
 
     with col2:
-        render_image_editor(manager)
+        render_image_editor(manager, filtered)
 
     render_sidebar(manager)

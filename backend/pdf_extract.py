@@ -15,6 +15,17 @@ PDF_RENDER_DPI = 200
 PROBE_PAGE_COUNT = 2
 
 
+def _object_pos(obj) -> Tuple[float, float, float, float]:
+    """(left, bottom, right, top) текстового объекта в координатах страницы PDF.
+
+    pypdfium2 4.x — ``obj.get_pos()``; 5.x переименовал его в ``obj.get_bounds()``
+    (та же семантика возврата). Поддерживаем обе, чтобы пин backend/requirements
+    и локальное окружение могли расходиться по минорной версии без падения.
+    """
+    getter = getattr(obj, "get_pos", None) or obj.get_bounds
+    return getter()
+
+
 def render_page(page: pdfium.PdfPage, dpi: int = PDF_RENDER_DPI) -> np.ndarray:
     """Рендерит страницу PDF в numpy-изображение (RGB) при заданном DPI"""
     bitmap = page.render(scale=dpi / 72)
@@ -48,45 +59,51 @@ def extract_page_text_boxes(
     """
     page_width, page_height = page.get_size()
     textpage = page.get_textpage()
-    char_boxes = [textpage.get_charbox(i) for i in range(textpage.count_chars())]
+    try:
+        char_boxes = [textpage.get_charbox(i) for i in range(textpage.count_chars())]
 
-    result: List[Tuple[List[List[float]], str]] = []
-    for obj in page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_TEXT]):
-        left_b, bottom_b, right_b, top_b = obj.get_pos()
-        indices = [
-            i
-            for i, box in enumerate(char_boxes)
-            if box[0] >= left_b and box[2] <= right_b and box[1] >= bottom_b and box[3] <= top_b
-        ]
-        if not indices:
-            continue
+        result: List[Tuple[List[List[float]], str]] = []
+        for obj in page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_TEXT]):
+            left_b, bottom_b, right_b, top_b = _object_pos(obj)
+            indices = [
+                i
+                for i, box in enumerate(char_boxes)
+                if box[0] >= left_b and box[2] <= right_b and box[1] >= bottom_b and box[3] <= top_b
+            ]
+            if not indices:
+                continue
 
-        text = "".join(textpage.get_text_range(i, 1) for i in indices).strip()
-        if not text:
-            continue
+            text = "".join(textpage.get_text_range(i, 1) for i in indices).strip()
+            if not text:
+                continue
 
-        boxes = [char_boxes[i] for i in indices]
-        left = min(b[0] for b in boxes)
-        bottom = min(b[1] for b in boxes)
-        right = max(b[2] for b in boxes)
-        top = max(b[3] for b in boxes)
+            boxes = [char_boxes[i] for i in indices]
+            left = min(b[0] for b in boxes)
+            bottom = min(b[1] for b in boxes)
+            right = max(b[2] for b in boxes)
+            top = max(b[3] for b in boxes)
 
-        x0 = _pdf_x_to_pix(left, page_width, image_width)
-        y0 = _pdf_y_to_pix(top, page_height, image_height)
-        x1 = _pdf_x_to_pix(right, page_width, image_width)
-        y1 = _pdf_y_to_pix(bottom, page_height, image_height)
+            x0 = _pdf_x_to_pix(left, page_width, image_width)
+            y0 = _pdf_y_to_pix(top, page_height, image_height)
+            x1 = _pdf_x_to_pix(right, page_width, image_width)
+            y1 = _pdf_y_to_pix(bottom, page_height, image_height)
 
-        result.append(([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], text))
+            result.append(([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], text))
 
-    return result
+        return result
+    finally:
+        textpage.close()
 
 
 def page_has_text_layer(page: pdfium.PdfPage) -> bool:
     """True, если у страницы PDF есть непустой извлекаемый текстовый слой"""
     textpage = page.get_textpage()
-    if textpage.count_chars() == 0:
-        return False
-    return bool(textpage.get_text_bounded().strip())
+    try:
+        if textpage.count_chars() == 0:
+            return False
+        return bool(textpage.get_text_bounded().strip())
+    finally:
+        textpage.close()
 
 
 def document_has_text_layer(

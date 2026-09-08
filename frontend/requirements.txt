@@ -1,3 +1,6 @@
-streamlit==1.36.0
-Pillow==10.4.0
-requests==2.32.3
+# Диапазоны, а не жёсткие пины: lockfile'а в репо нет, а устаревшие пины уже
+# ловили известные CVE. Обновлять пол по мере необходимости; `pip-audit`
+# (requirements-dev.txt) проверяет актуальность.
+streamlit>=1.37,<2        # 1.37: CVE-2024-42474 (path traversal); st.fragment стабилен
+Pillow>=11.0,<13          # decompression-bomb фиксы; см. Image.MAX_IMAGE_PIXELS в app.py
+requests>=2.32.4,<3       # 2.32.4: CVE-2024-47081 (.netrc creds на редиректе)

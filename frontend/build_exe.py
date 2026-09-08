@@ -3,24 +3,27 @@
 Run from frontend/: `python build_exe.py`
 Deps: pip install -r requirements-build.txt
 
-Wraps the command in pyinst_command.txt so it doesn't need to be retyped by
-hand; produces a native executable for the host OS (.exe on Windows).
+Produces a native executable for the host OS (.exe on Windows). wrapper.py
+launches `streamlit run app.py`, and app.py does `from src.i18n import ...`,
+so BOTH app.py and the whole src/ package must be bundled as data.
 """
 import subprocess
 import sys
 
-ADD_DATA = "app.py;." if sys.platform == "win32" else "app.py:."
+SEP = ";" if sys.platform == "win32" else ":"
+ADD_DATA = [f"app.py{SEP}.", f"src{SEP}src"]
 
 CMD = [
     sys.executable, "-m", "PyInstaller",
     "--onefile",
-    "--add-data", ADD_DATA,
     "wrapper.py",
     "--hidden-import", "streamlit",
     "--copy-metadata", "streamlit",
     "--collect-submodules", "streamlit",
     "--collect-all", "streamlit",
 ]
+for entry in ADD_DATA:
+    CMD += ["--add-data", entry]
 
 if __name__ == "__main__":
     subprocess.run(CMD, check=True)

@@ -65,6 +65,10 @@ def _render_edit_form(manager: AnnotationManager, current_name: str, record, img
                 if success:
                     st.session_state.unsaved_changes = 0
                     st.success(t("autosave_msg"))
+                else:
+                    # Раньше провал автосейва был молчаливым — метки не
+                    # сохранялись, а пользователь этого не видел.
+                    st.error(msg)
             else:
                 st.success(t("in_memory_msg", count=st.session_state.unsaved_changes))
 
@@ -182,16 +186,19 @@ def _render_engine_details(manager: AnnotationManager, record):
             st.caption(f"{marker}**{engine_name}** ({score:.2f}): {text or t('empty_placeholder')}")
 
 
-def render_image_editor(manager: AnnotationManager):
-    """Отрисовывает редактор изображения"""
-    if not manager.records:
+def render_image_editor(manager: AnnotationManager, img_names: list):
+    """Отрисовывает редактор изображения.
+
+    img_names — тот же отфильтрованный список, что показывает list_view;
+    current_idx индексирует именно его (см. list_view)."""
+    if not img_names:
         st.warning(t("no_images_editor"))
         return
 
-    # Получаем текущее изображение
-    img_names = list(manager.records.keys())
     if st.session_state.current_idx >= len(img_names):
         st.session_state.current_idx = len(img_names) - 1
+    if st.session_state.current_idx < 0:
+        st.session_state.current_idx = 0
 
     current_name = img_names[st.session_state.current_idx]
     record = manager.records[current_name]

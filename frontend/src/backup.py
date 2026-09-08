@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -32,10 +33,13 @@ class BackupManager:
         return {"backups": []}
 
     def _save_metadata(self):
-        """Сохраняет метаданные"""
-        self.metadata_file.write_text(
+        """Сохраняет метаданные атомарно (tmp + replace) — прерывание записи
+        не должно оставить metadata.json полупустым/битым."""
+        tmp = self.metadata_file.with_suffix(".json.tmp")
+        tmp.write_text(
             json.dumps(self.metadata, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        os.replace(tmp, self.metadata_file)
 
     def create_backup(
         self, source_file: Path, operation: str = "manual"

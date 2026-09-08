@@ -13,8 +13,9 @@ import json
 import os
 import threading
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional
+from typing import Deque, Dict, List, Literal, Optional
 
 from backend import pipeline, pipeline_vlm
 from backend.config import (
@@ -54,9 +55,11 @@ class JobState:
     # невидимы в UI: пользователь видел просто меньшую итоговую цифру без
     # объяснения. error_count считает все случаи, errors хранит последние
     # MAX_STORED_ERRORS сообщений (не безгранично, чтобы не раздувать память
-    # на большой папке с систематической проблемой).
+    # на большой папке с систематической проблемой). deque(maxlen=...):
+    # append атомарен и сам вытесняет старое — не нужен pop(0) из фонового
+    # потока, пока status_dict итерирует список из HTTP-потока.
     error_count: int = 0
-    errors: List[str] = field(default_factory=list)
+    errors: Deque[str] = field(default_factory=lambda: deque(maxlen=MAX_STORED_ERRORS))
     # Кооперативная отмена — поток нельзя убить напрямую, поэтому
     # pipeline.run() сам проверяет этот флаг между файлами/страницами/
     # строками (см. should_cancel в backend/pipeline.py).
@@ -106,6 +109,12 @@ _jobs: Dict[str, JobState] = {}
 # завершилось, и (2) дать фронтенду восстановить job_id после перезагрузки
 # страницы (Streamlit-сессия при F5 создаётся заново и теряет session_state).
 _active_job_id: Optional[str] = None
+# _jobs / _active_job_id читаются и пишутся из request-потоков FastAPI
+# (start_job, cancel_job) И из фонового потока job'а (_run_job) — FastAPI
+# гоняет sync-обработчики в threadpool, так что конкурентность реальна.
+# Без лока check-then-set в start_job («если нет активного — стартуем»)
+# не атомарен: два одновременных POST /run могли оба пройти гейт.
+_lock = threading.Lock()
 
 
 def _run_job(
@@ -145,9 +154,7 @@ def _run_job(
 
     def on_error(msg: str) -> None:
         state.error_count += 1
-        state.errors.append(msg)
-        if len(state.errors) > MAX_STORED_ERRORS:
-            state.errors.pop(0)
+        state.errors.append(msg)  # deque(maxlen=...) сам вытесняет старое
 
     def should_cancel() -> bool:
         return state.cancel_event.is_set()
@@ -184,18 +191,25 @@ def _run_job(
                 on_error=on_error,
                 should_cancel=should_cancel,
             )
-        state.status = "cancelled" if state.cancel_event.is_set() else "done"
+        final_status = "cancelled" if state.cancel_event.is_set() else "done"
         state.result = {
             "output_dir": output_dir,
             "good_count": good_count,
             "needs_review_count": needs_review_count,
         }
     except Exception as e:
-        state.status = "error"
+        final_status = "error"
         state.error = str(e)
     finally:
+        # Сначала освобождаем слот, потом переводим статус из "running" —
+        # чтобы наблюдатель, увидевший терминальный статус, гарантированно
+        # видел _active_job_id уже сброшенным (иначе /run мог отклониться
+        # 409, а трекер — «залипнуть» на секунду).
+        with _lock:
+            if _active_job_id == job_id:
+                _active_job_id = None
+        state.status = final_status
         _write_snapshot(output_dir, state)
-        _active_job_id = None
 
 
 def start_job(
@@ -226,12 +240,12 @@ def start_job(
     код (main.py) должен превращать это в HTTP 409.
     """
     global _active_job_id
-    if _active_job_id is not None:
-        raise RuntimeError(f"Уже выполняется задание {_active_job_id}")
-
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = JobState(status="running")
-    _active_job_id = job_id
+    with _lock:
+        if _active_job_id is not None:
+            raise RuntimeError(f"Уже выполняется задание {_active_job_id}")
+        _jobs[job_id] = JobState(status="running")
+        _active_job_id = job_id
     thread = threading.Thread(
         target=_run_job,
         args=(
@@ -258,11 +272,13 @@ def start_job(
 
 
 def get_job(job_id: str) -> Optional[JobState]:
-    return _jobs.get(job_id)
+    with _lock:
+        return _jobs.get(job_id)
 
 
 def get_active_job_id() -> Optional[str]:
-    return _active_job_id
+    with _lock:
+        return _active_job_id
 
 
 def cancel_job(job_id: str) -> None:
@@ -273,7 +289,8 @@ def cancel_job(job_id: str) -> None:
     Поднимает KeyError, если job_id неизвестен, и RuntimeError, если задание
     уже не выполняется — main.py превращает их в 404/409.
     """
-    state = _jobs.get(job_id)
+    with _lock:
+        state = _jobs.get(job_id)
     if state is None:
         raise KeyError(f"Задание {job_id} не найдено")
     if state.status != "running":

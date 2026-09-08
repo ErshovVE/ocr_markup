@@ -35,4 +35,7 @@ Ship the backend with no authentication layer and no restriction on which filesy
 - Docker Compose's mounted `./data` volume limits blast radius in that deployment mode, but bare `uvicorn` runs have no such boundary
 
 ### Risks
-- **Accidental exposure on a shared/multi-user machine or network** — mitigated only by documentation (`backend/README.md`, `docs/RUNBOOK.md`) telling operators not to do this; there is no code-level safeguard. If this backend is ever deployed beyond a single local user, this ADR must be revisited alongside ADR-0001.
+- **Accidental exposure on a shared/multi-user machine or network** — mitigated by documentation (`backend/README.md`, `docs/RUNBOOK.md`) plus two partial code-level safeguards added later:
+  - `docker-compose.yml` binds every published port to `127.0.0.1`, so the Compose deployment is not LAN-reachable by default.
+  - `OCR_DATA_ROOT` (env var, unset by default; set to `/data` in Compose) — when set, `POST /run` and `GET /jobs/status_snapshot` reject `input_dir`/`output_dir` that resolve outside it (`backend/main.py::_reject_outside_data_root`).
+  Bare `uvicorn` runs still have no path boundary unless the operator sets `OCR_DATA_ROOT`. If this backend is ever deployed beyond a single local user, this ADR must be revisited alongside ADR-0001 (add real auth, make `OCR_DATA_ROOT` mandatory).

@@ -1,13 +1,16 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
+# Диапазоны, а не жёсткие пины: lockfile'а в репо нет. `pip-audit`
+# (requirements-dev.txt) проверяет актуальность перед релизом.
+fastapi>=0.115.2,<1
+python-multipart>=0.0.18   # CVE-2024-53981 (multipart DoS) — FastAPI 0.115.0 пускал старые
+uvicorn[standard]>=0.30.6,<1
 paddleocr==3.7.0
 paddlepaddle==3.3.1
 surya-ocr==0.16.0
 pytesseract==0.3.13
-opencv-python==4.10.0.84
-Pillow==10.4.0
-pypdfium2==4.30.0
+opencv-python>=4.10.0.84,<5
+Pillow>=11.0,<13
+pypdfium2>=5.11,<6         # 5.x: PdfObject.get_pos -> get_bounds (backend/pdf_extract.py совместим с обеими)
 # VLM-режим: тонкий OpenAI-совместимый HTTP-клиент к внешним сервисам моделей
 # (llama-server / Ollama / vLLM). Единственная новая зависимость — тяжёлых ML-
 # пакетов VLM backend не тянет. Уже подтягивается транзитивно fastapi TestClient.
-httpx==0.28.1
+httpx>=0.28.1,<1

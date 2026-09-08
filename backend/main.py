@@ -1,10 +1,11 @@
 import os
-from typing import List, Optional
+from contextlib import asynccontextmanager
+from typing import List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
-from backend import jobs, models_status
+from backend import jobs, models_status, vlm_client
 from backend.config import (
     DEFAULT_ENGINES,
     DEFAULT_IOU_THRESHOLD,
@@ -18,17 +19,45 @@ from backend.detector import DEFAULT_DETECTOR_ENGINE, DETECTOR_ENGINES
 from backend.jobs import cancel_job, get_active_job_id, get_job, get_status_snapshot, start_job
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE, LATIN_MODEL_SIZES
 
+# Литералы в RunRequest дублируют эти кортежи ради OpenAPI-схемы — ловим дрейф.
+assert set(LATIN_MODEL_SIZES) == {"tiny", "small", "medium"}
+assert set(DETECTOR_ENGINES) == {"paddle", "surya", "tesseract"}
+
 # Ключ детектора в models_status.get_status() для каждого detector_engine.
 # "tesseract" не включён отдельно — он уже проверяется как движок
 # распознавания (общий бинарник на детекцию и распознавание, см.
 # backend/README.md), дублировать предупреждение незачем.
 _DETECTOR_STATUS_KEYS = {"paddle": "paddle_detector", "surya": "surya_detector"}
 
+# Опциональный allow-list каталогов. Если OCR_DATA_ROOT задан, input_dir/
+# output_dir обязаны резолвиться внутри него (в Docker это /data). Не задан —
+# поведение спайка без ограничений (ADR-0002). Это code-level страховка на
+# случай, если порт всё же окажется доступен извне.
+_DATA_ROOT = os.environ.get("OCR_DATA_ROOT")
+
+
+def _reject_outside_data_root(path: str, label: str) -> None:
+    if not _DATA_ROOT:
+        return
+    root = os.path.realpath(_DATA_ROOT)
+    resolved = os.path.realpath(path)
+    try:
+        inside = os.path.commonpath([root, resolved]) == root
+    except ValueError:
+        # разные диски на Windows / несопоставимые пути
+        inside = False
+    if not inside:
+        raise HTTPException(400, f"{label} вне разрешённого каталога OCR_DATA_ROOT")
+
 
 def _readiness_warnings(req: "RunRequest") -> List[str]:
     """Предупреждения о неготовых моделях перед стартом job'а — раньше /run
     просто стартовал вслепую, и первая же строка могла "молча" зависнуть на
-    скачивании гигабайтных весов без единого объяснения в UI."""
+    скачивании гигабайтных весов без единого объяснения в UI.
+
+    Считается ДО start_job (см. run()): медленная проверка задерживает старт
+    job'а, а не отрывается от HTTP-ответа. VLM-пинги в get_status конкурентны
+    и кэшируются (backend/models_status.py), поэтому это дёшево."""
     status = models_status.get_status(include_vlm=req.mode == "vlm")
     warnings: List[str] = []
 
@@ -61,97 +90,128 @@ def _readiness_warnings(req: "RunRequest") -> List[str]:
     return warnings
 
 
-# Локальный однопользовательский сервис без аутентификации (см. backend/README.md) —
-# входные пути не ограничены заранее известным корнем намеренно, так как
-# мейнтейнер сам указывает произвольную рабочую папку с документами.
-app = FastAPI(title="OCR Consensus Backend")
+@asynccontextmanager
+async def _lifespan(_app: "FastAPI"):
+    yield
+    vlm_client.close()  # закрыть module-level httpx.Client VLM-режима
+
+
+# Локальный однопользовательский сервис без аутентификации (см. ADR-0002 и
+# backend/README.md). Опциональный OCR_DATA_ROOT (выше) — единственная
+# code-level граница; по умолчанию входные пути не ограничены намеренно.
+app = FastAPI(title="OCR Consensus Backend", lifespan=_lifespan)
 
 
 class RunRequest(BaseModel):
     input_dir: str
     output_dir: str
-    score_threshold: float = DEFAULT_SCORE_THRESHOLD
+    score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
     preferred_model: Optional[str] = None
     # "ru" (по умолчанию) — распознавание кириллицы (cyrillic_PP-OCRv5_mobile_rec).
     # "latin" — вместо него используется PaddleOCR PP-OCRv6 для латиницы/не-русского
     # текста; tesseract при этом тоже переключается на lang="eng".
-    lang: str = "ru"
-    latin_model_size: str = DEFAULT_LATIN_MODEL_SIZE
+    lang: Literal["ru", "latin"] = "ru"
+    latin_model_size: Literal["tiny", "small", "medium"] = DEFAULT_LATIN_MODEL_SIZE
     # Если во входной папке есть PDF с извлекаемым текстовым слоем —
     # вытащить текст+координаты напрямую (без OCR) и сразу пометить как good.
-    # См. backend/README.md, раздел "PDF".
     extract_pdf_text_layer: bool = True
-    # Движок детекции строк текста — независим от preferred_model
-    # (который влияет только на голосование распознавания).
-    detector_engine: str = DEFAULT_DETECTOR_ENGINE
-    # Какие движки распознавания вообще прогонять на строку — раньше всегда
-    # были прошиты все 3. engines/min_agree вместе задают схему "N из M" из
-    # фронтенда (1 из 1 / 1 из 2 / 2 из 2 / 2 из 3, см.
-    # frontend/src/ui/generation_view.py): min_agree — сколько из engines
-    # должны сойтись в одном тексте, чтобы принять его без разбора (см.
-    # backend/consensus.py::vote).
-    engines: List[str] = list(DEFAULT_ENGINES)
-    min_agree: int = DEFAULT_MIN_AGREE
-    # mode="consensus" (по умолчанию) — классический построчный консенсус;
-    # mode="vlm" — полностраничный VLM-парсинг (см. backend/pipeline_vlm.py).
-    # При mode="vlm" классические поля (engines/min_agree/detector_engine/lang)
-    # игнорируются, работают vlm_engines/vlm_min_agree/iou_threshold.
-    mode: str = "consensus"
-    vlm_engines: List[str] = []
-    vlm_min_agree: int = DEFAULT_VLM_MIN_AGREE
-    iou_threshold: float = DEFAULT_IOU_THRESHOLD
+    # Движок детекции строк текста — независим от preferred_model.
+    detector_engine: Literal["paddle", "surya", "tesseract"] = DEFAULT_DETECTOR_ENGINE
+    # Какие движки распознавания прогонять на строку; min_agree — сколько из
+    # них должны сойтись в тексте, чтобы принять без разбора (см.
+    # backend/consensus.py::vote, frontend схема "N из M").
+    engines: List[str] = Field(default_factory=lambda: list(DEFAULT_ENGINES))
+    min_agree: int = Field(DEFAULT_MIN_AGREE, ge=1)
+    # mode="consensus" (по умолчанию) — построчный консенсус; mode="vlm" —
+    # полностраничный VLM-парсинг (backend/pipeline_vlm.py). При mode="vlm"
+    # engines/min_agree/detector_engine/lang игнорируются.
+    mode: Literal["consensus", "vlm"] = "consensus"
+    vlm_engines: List[str] = Field(default_factory=list)
+    vlm_min_agree: int = Field(DEFAULT_VLM_MIN_AGREE, ge=1)
+    iou_threshold: float = Field(DEFAULT_IOU_THRESHOLD, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _check_cross_fields(self) -> "RunRequest":
+        if self.mode == "vlm":
+            bad = [e for e in self.vlm_engines if e not in VLM_ENGINES]
+            if not self.vlm_engines or bad:
+                raise ValueError(
+                    f"vlm_engines должен быть непустым подмножеством {VLM_ENGINES}: "
+                    f"{self.vlm_engines}"
+                )
+            if not (1 <= self.vlm_min_agree <= len(self.vlm_engines)):
+                raise ValueError(
+                    f"vlm_min_agree должен быть от 1 до len(vlm_engines)="
+                    f"{len(self.vlm_engines)}: {self.vlm_min_agree}"
+                )
+        else:
+            bad = [e for e in self.engines if e not in RECOGNITION_ENGINES]
+            if not self.engines or bad:
+                raise ValueError(
+                    f"engines должен быть непустым подмножеством {RECOGNITION_ENGINES}: "
+                    f"{self.engines}"
+                )
+            if not (1 <= self.min_agree <= len(self.engines)):
+                raise ValueError(
+                    f"min_agree должен быть от 1 до len(engines)={len(self.engines)}: "
+                    f"{self.min_agree}"
+                )
+            if self.preferred_model is not None and self.preferred_model not in self.engines:
+                raise ValueError(
+                    f"preferred_model должен быть одним из engines {self.engines}: "
+                    f"{self.preferred_model}"
+                )
+        return self
 
 
 class PrepareRequest(BaseModel):
     model: str
 
 
-@app.post("/run")
+class RunResponse(BaseModel):
+    job_id: str
+    warnings: List[str]
+
+
+class JobStatusResponse(BaseModel):
+    status: str
+    error: Optional[str] = None
+    docs_found: int = 0
+    docs_processed: int = 0
+    good_count: int = 0
+    review_count: int = 0
+    diverged_count: int = 0
+    error_count: int = 0
+    errors: List[str] = Field(default_factory=list)
+
+
+class CancelResponse(BaseModel):
+    status: str
+
+
+class ActiveJobResponse(BaseModel):
+    job_id: Optional[str]
+
+
+class ModelStatusEntry(BaseModel):
+    status: str
+    detail: Optional[str] = None
+
+
+@app.post("/run", response_model=RunResponse, responses={400: {}, 409: {}})
 def run(req: RunRequest):
+    _reject_outside_data_root(req.input_dir, "input_dir")
+    _reject_outside_data_root(req.output_dir, "output_dir")
     if not os.path.isdir(req.input_dir):
         raise HTTPException(400, f"input_dir не найдена: {req.input_dir}")
-    if req.mode not in ("consensus", "vlm"):
-        raise HTTPException(400, f"mode должен быть 'consensus' или 'vlm': {req.mode}")
+    try:
+        os.makedirs(req.output_dir, exist_ok=True)
+    except OSError as e:
+        raise HTTPException(400, f"output_dir недоступна для записи: {e}") from e
 
-    if req.mode == "vlm":
-        if not req.vlm_engines or any(e not in VLM_ENGINES for e in req.vlm_engines):
-            raise HTTPException(
-                400,
-                f"vlm_engines должен быть непустым подмножеством {VLM_ENGINES}: "
-                f"{req.vlm_engines}",
-            )
-        if not (1 <= req.vlm_min_agree <= len(req.vlm_engines)):
-            raise HTTPException(
-                400,
-                f"vlm_min_agree должен быть от 1 до len(vlm_engines)="
-                f"{len(req.vlm_engines)}: {req.vlm_min_agree}",
-            )
-        if not (0.0 < req.iou_threshold <= 1.0):
-            raise HTTPException(400, f"iou_threshold должен быть в (0, 1]: {req.iou_threshold}")
-    else:
-        if req.lang not in ("ru", "latin"):
-            raise HTTPException(400, f"lang должен быть 'ru' или 'latin': {req.lang}")
-        if req.latin_model_size not in LATIN_MODEL_SIZES:
-            raise HTTPException(
-                400,
-                f"latin_model_size должен быть одним из {LATIN_MODEL_SIZES}: "
-                f"{req.latin_model_size}",
-            )
-        if req.detector_engine not in DETECTOR_ENGINES:
-            raise HTTPException(
-                400,
-                f"detector_engine должен быть одним из {DETECTOR_ENGINES}: {req.detector_engine}",
-            )
-        if not req.engines or any(e not in RECOGNITION_ENGINES for e in req.engines):
-            raise HTTPException(
-                400,
-                f"engines должен быть непустым подмножеством {RECOGNITION_ENGINES}: {req.engines}",
-            )
-        if not (1 <= req.min_agree <= len(req.engines)):
-            raise HTTPException(
-                400,
-                f"min_agree должен быть от 1 до len(engines)={len(req.engines)}: {req.min_agree}",
-            )
+    # Предупреждения о неготовых моделях — ДО старта job'а, чтобы клиент,
+    # получивший ответ, не видел ложную ошибку для уже запущенного задания.
+    warnings = _readiness_warnings(req)
 
     try:
         job_id = start_job(
@@ -172,10 +232,10 @@ def run(req: RunRequest):
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
-    return {"job_id": job_id, "warnings": _readiness_warnings(req)}
+    return {"job_id": job_id, "warnings": warnings}
 
 
-@app.get("/jobs/active")
+@app.get("/jobs/active", response_model=ActiveJobResponse)
 def active_job():
     """Возвращает job_id текущего выполняющегося задания (или null), чтобы
     фронтенд мог восстановить трекер прогресса после перезагрузки страницы —
@@ -183,7 +243,7 @@ def active_job():
     return {"job_id": get_active_job_id()}
 
 
-@app.get("/status/{job_id}")
+@app.get("/status/{job_id}", response_model=JobStatusResponse, responses={404: {}})
 def status(job_id: str):
     job = get_job(job_id)
     if job is None:
@@ -191,7 +251,7 @@ def status(job_id: str):
     return jobs.status_dict(job)
 
 
-@app.post("/jobs/{job_id}/cancel")
+@app.post("/jobs/{job_id}/cancel", response_model=CancelResponse, responses={404: {}, 409: {}})
 def cancel_job_endpoint(job_id: str):
     """Просит задание остановиться на ближайшей проверке — см. cancel_job()
     в backend/jobs.py. Не мгновенно: status станет "cancelled" в /status,
@@ -205,22 +265,25 @@ def cancel_job_endpoint(job_id: str):
     return {"status": "cancelling"}
 
 
-@app.get("/jobs/status_snapshot")
+@app.get("/jobs/status_snapshot", response_model=JobStatusResponse, responses={400: {}, 404: {}})
 def job_status_snapshot(output_dir: str):
     """Статус последнего задания для output_dir, переживший рестарт
     backend'а (в отличие от /status/{job_id} — job_id теряется вместе с
     памятью процесса, см. докстринг backend/jobs.py)."""
+    _reject_outside_data_root(output_dir, "output_dir")
     snapshot = get_status_snapshot(output_dir)
     if snapshot is None:
         raise HTTPException(404, "Снэпшот не найден для этой output_dir")
     return snapshot
 
 
-@app.get("/result/{job_id}")
+@app.get("/result/{job_id}", responses={404: {}, 409: {}})
 def result(job_id: str):
     job = get_job(job_id)
-    if job is None or job.status != "done":
-        raise HTTPException(404, "Result not ready")
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.status != "done":
+        raise HTTPException(409, f"Результат не готов (status={job.status})")
     return job.result
 
 
@@ -232,7 +295,7 @@ def models_status_endpoint():
     }
 
 
-@app.post("/models/prepare")
+@app.post("/models/prepare", responses={400: {}})
 def models_prepare(req: PrepareRequest):
     try:
         models_status.prepare(req.model)

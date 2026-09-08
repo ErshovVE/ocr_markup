@@ -15,8 +15,10 @@ def reset_model_state():
         "surya_detector": models_status.ModelState(),
     }
     models_status._state = dict(state)
+    models_status._vlm_cache.clear()
     yield
     models_status._state = dict(state)
+    models_status._vlm_cache.clear()
 
 
 def test_check_tesseract_missing_binary():
@@ -79,7 +81,8 @@ def test_check_vlm_endpoint_ready_on_reachable_service(monkeypatch):
     with patch("httpx.get", return_value=MagicMock()):
         state = models_status.check_vlm_endpoint("dots_ocr")
     assert state.status == "ready"
-    assert state.detail == "http://vllm-dots:8082"
+    # URL сервиса наружу не отдаём (M8) — detail пустой.
+    assert state.detail is None
 
 
 def test_check_vlm_endpoint_error_when_unreachable(monkeypatch):
@@ -87,7 +90,8 @@ def test_check_vlm_endpoint_error_when_unreachable(monkeypatch):
     with patch("httpx.get", side_effect=RuntimeError("connection refused")):
         state = models_status.check_vlm_endpoint("dots_ocr")
     assert state.status == "error"
-    assert "connection refused" in state.detail
+    # Общий текст, без внутренних деталей (M8).
+    assert state.detail == "эндпоинт недоступен"
 
 
 def test_check_vlm_endpoint_error_for_unknown_engine():

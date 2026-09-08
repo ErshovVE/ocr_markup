@@ -1,8 +1,12 @@
 import streamlit as st
+from PIL import Image
 
 from src.i18n import render_language_switch, t
 from src.ui.generation_view import render_generation_mode
 from src.ui.manual_mode import render_manual_mode
+
+# Потолок против decompression-bomb (картинки из произвольной рабочей папки).
+Image.MAX_IMAGE_PIXELS = 64_000_000
 
 st.set_page_config(layout="wide", page_title="OCR Markup / Разметка OCR")
 
@@ -24,12 +28,6 @@ def init_session_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
-
-
-def check_hotkeys():
-    """Проверяет нажатие горячих клавиш через query params"""
-    # Альтернативный метод через session storage и query params
-    pass
 
 
 def render_mode_landing():

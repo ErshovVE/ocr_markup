@@ -47,24 +47,25 @@ def render_image_list(manager: AnnotationManager, filtered_images: List[str]):
     start = st.session_state.current_page * st.session_state.page_size
     end = min(start + st.session_state.page_size, total)
 
-    # Список
+    # Список. current_idx — позиция в ОТФИЛЬТРОВАННОМ списке (тот же, что
+    # обходит редактор ←/→), а не в полном manager.records — иначе навигация
+    # в редакторе уводила бы на записи вне активного фильтра.
     with st.container(height=350):
-        for _i, img_name in enumerate(filtered_images[start:end]):
+        for offset, img_name in enumerate(filtered_images[start:end]):
             record = manager.records[img_name]
             status = "✅" if record.is_marked else "❓"
             diverged_marker = "⚠️ " if record.diverged else ""
             display = f"{status} {diverged_marker}{img_name}"
 
-            # Находим глобальный индекс
-            global_idx = list(manager.records.keys()).index(img_name)
+            filtered_idx = start + offset
 
-            if global_idx == st.session_state.current_idx:
+            if filtered_idx == st.session_state.current_idx:
                 st.markdown(f"**→ {display}**")
             else:
                 if st.button(
-                    display, key=f"img_{global_idx}", use_container_width=True
+                    display, key=f"img_{filtered_idx}", use_container_width=True
                 ):
-                    st.session_state.current_idx = global_idx
+                    st.session_state.current_idx = filtered_idx
                     st.rerun()
 
     # Компактные кнопки пагинации

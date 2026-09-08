@@ -1,10 +1,15 @@
+# Все published-порты биндятся на 127.0.0.1: бэкенд без аутентификации и
+# Streamlit с выключенным XSRF не должны быть доступны из LAN (ADR-0002 ставит
+# весь дизайн «без auth / без валидации путей» в зависимость от этого). Внутри
+# compose-сети сервисы всё равно видят друг друга по имени (frontend ->
+# http://backend:8756).
 services:
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     volumes:
       - ./data:/data
     environment:
@@ -16,13 +21,16 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     ports:
-      - "8756:8756"
+      - "127.0.0.1:8756:8756"
     volumes:
       - ./data:/data
       - paddleocr-models:/root/.paddlex
       - surya-models:/root/.cache/datalab
     environment:
       - PYTHONUNBUFFERED=1
+      # Code-level граница путей: input_dir/output_dir в /run обязаны быть
+      # внутри /data (см. backend/main.py::_reject_outside_data_root).
+      - OCR_DATA_ROOT=/data
       # VLM-режим (см. backend/pipeline_vlm.py). Дефолты указывают на
       # companion-сервисы ниже; переопределяются через .env / окружение.
       - GLM_OCR_ENDPOINT=${GLM_OCR_ENDPOINT:-http://ollama:11434}
@@ -35,17 +43,23 @@ services:
   # CPU-профиль:  docker compose --profile vlm-cpu up -d
   # GPU-профиль:  docker compose --profile vlm-gpu up -d   (нужен nvidia-container-toolkit)
   # Скрипты-обёртки: scripts/vlm/setup.sh  /  scripts/vlm/setup.ps1
+  #
+  # ВНИМАНИЕ (supply chain): образы ниже стоит пинить по digest
+  # (image: ...@sha256:...), а модели — по --revision <commit>. :latest и
+  # плавающие теги означают, что скомпрометированный upstream = RCE в
+  # контейнере, тем более что vLLM-сервисы запускаются с --trust-remote-code
+  # (исполняют произвольный Python из HF-репозитория модели при загрузке).
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:latest  # TODO: запиновать digest
     profiles: ["vlm-cpu"]
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama-models:/root/.ollama
 
   ollama-pull:
-    image: ollama/ollama:latest
+    image: ollama/ollama:latest  # TODO: запиновать digest
     profiles: ["vlm-cpu"]
     depends_on:
       - ollama
@@ -59,22 +73,24 @@ services:
     restart: "no"
 
   llama-hunyuan:
-    image: ghcr.io/ggml-org/llama.cpp:server
+    image: ghcr.io/ggml-org/llama.cpp:server  # TODO: запиновать конкретный server-bNNNN тег/digest
     profiles: ["vlm-cpu"]
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     volumes:
       - llama-hf-cache:/root/.cache/llama.cpp
     command: >
       -hf ggml-org/HunyuanOCR-GGUF --host 0.0.0.0 --port 8081 -c 16384
 
   vllm-dots:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.11.0  # dots.ocr требует vLLM >= 0.11.0 (см. .env.example)
     profiles: ["vlm-gpu"]
     ports:
-      - "8082:8082"
+      - "127.0.0.1:8082:8082"
     volumes:
       - hf-cache:/root/.cache/huggingface
+    # --trust-remote-code: vLLM исполнит Python из репозитория rednote-hilab/dots.ocr
+    # при загрузке модели. Пиньте --revision, если возможно.
     command: >
       --model rednote-hilab/dots.ocr --trust-remote-code --served-model-name dots.ocr
       --port 8082
@@ -87,12 +103,13 @@ services:
               capabilities: [gpu]
 
   vllm-unlimited:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.11.0
     profiles: ["vlm-gpu"]
     ports:
-      - "8083:8083"
+      - "127.0.0.1:8083:8083"
     volumes:
       - hf-cache:/root/.cache/huggingface
+    # --trust-remote-code: см. комментарий у vllm-dots.
     command: >
       --model baidu/Unlimited-OCR --trust-remote-code --served-model-name baidu/Unlimited-OCR
       --port 8083

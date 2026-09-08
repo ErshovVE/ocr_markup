@@ -6,10 +6,12 @@ vlm_client.chat и _save_crop замоканы — ни сети, ни запи�
 import json
 import os
 
+import numpy as np
 import pytest
 from PIL import Image
 
 from backend import pipeline_vlm
+from backend.config import VLM_MAX_IMAGE_SIDE
 
 _DOTS_ANSWER = '[{"bbox": [10, 10, 180, 45], "category": "Text", "text": "ПРИВЕТ МИР"}]'
 
@@ -246,6 +248,53 @@ def test_out_of_bounds_bbox_is_clamped_not_wrapped(monkeypatch, one_png, tmp_pat
     assert good == 1
     # 300x200 png → кроп зажат в границы страницы, без обёртки отрицательных индексов
     assert saved == [(200, 300, 3)]
+
+
+def test_native_boxes_align_after_page_downscale(monkeypatch, tmp_path):
+    """H1-регресс: страница > VLM_MAX_IMAGE_SIDE даунскейлится один раз, и бокс
+    от модели (в уменьшенном пространстве) должен резаться из того же массива —
+    иначе кроп съезжает. Правая половина листа чёрная; модель отдаёт бокс
+    правой половины в координатах уменьшенной страницы."""
+    w = VLM_MAX_IMAGE_SIDE * 2  # 4096 -> после даунскейла 2048
+    arr = np.full((w // 4, w, 3), 255, dtype=np.uint8)
+    arr[:, w // 2 :] = 0  # правая половина — чёрная
+    Image.fromarray(arr).save(tmp_path / "wide.png")
+
+    half_ds = VLM_MAX_IMAGE_SIDE // 2  # правая половина в уменьшенном пространстве
+    answer = (
+        f'[{{"bbox": [{half_ds}, 0, {VLM_MAX_IMAGE_SIDE}, {w // 8}], '
+        f'"category": "Text", "text": "чёрная зона"}}]'
+    )
+    saved = []
+    monkeypatch.setattr(pipeline_vlm.vlm_client, "chat", lambda *a, **k: answer)
+    monkeypatch.setattr(pipeline_vlm, "_save_crop", lambda crop, path: saved.append(crop))
+    out = tmp_path / "out"
+
+    events, good, review = _run(tmp_path, out)
+
+    assert good == 1
+    assert saved and float(saved[0].mean()) < 10  # кроп попал в чёрную зону, не в белую
+
+
+def test_duplicate_lines_across_engines_are_deduped(monkeypatch, one_png, tmp_path):
+    """M18-регресс: vlm_min_agree=1 + 2 движка с почти совпадающими боксами и
+    одинаковым текстом — одна строка, не две."""
+
+    def fake_chat(engine_id, prompt, image):
+        if engine_id == "dots_ocr":
+            return '[{"bbox": [10, 10, 180, 44], "category": "Text", "text": "ПРИВЕТ"}]'
+        return "ПРИВЕТ(11,11),(181,45)"  # чуть смещённый бокс, IoU < 0.5, но пересекается
+
+    monkeypatch.setattr(pipeline_vlm.vlm_client, "chat", fake_chat)
+    monkeypatch.setattr(pipeline_vlm, "_save_crop", lambda *a, **k: None)
+    out = tmp_path / "out"
+
+    events, good, review = _run(
+        one_png, out, vlm_engines=["dots_ocr", "hunyuan_ocr"], vlm_min_agree=1, iou_threshold=0.9
+    )
+
+    assert (good, review) == (1, 0)
+    assert len((out / "good.txt").read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_pdf_pages_are_rasterised_and_processed(monkeypatch, tmp_path):

@@ -54,9 +54,13 @@ def render_sidebar(manager: AnnotationManager):
 
         if st.session_state.show_backups:
             for i, backup in enumerate(backups[:3]):  # Только последние 3
-                timestamp_formatted = datetime.strptime(
-                    backup["timestamp"], "%Y%m%d_%H%M%S"
-                ).strftime("%d.%m %H:%M")
+                # Одна битая запись метаданных не должна ронять весь сайдбар.
+                try:
+                    timestamp_formatted = datetime.strptime(
+                        backup["timestamp"], "%Y%m%d_%H%M%S"
+                    ).strftime("%d.%m %H:%M")
+                except (KeyError, ValueError, TypeError):
+                    timestamp_formatted = str(backup.get("timestamp", "?"))
 
                 operation_emoji = {"save": "💾", "delete": "🗑️", "manual": "✋"}.get(
                     backup["operation"], "📝"

@@ -1,7 +1,8 @@
 -r frontend/requirements.txt
 
-pytest==8.3.3
-pytest-cov==5.0.0
-ruff==0.7.4
-pypdfium2==4.30.1
-numpy==1.26.4
+pytest>=8.3.3,<9
+pytest-cov>=5.0.0,<7
+ruff>=0.7.4
+pip-audit>=2.7            # проверка зависимостей на известные уязвимости
+pypdfium2>=5.11,<6        # держим в одной мажорной линии с backend/requirements.txt
+numpy>=1.26.4,<3

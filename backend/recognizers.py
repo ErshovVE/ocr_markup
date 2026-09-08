@@ -48,7 +48,9 @@ class _Engines:
 
 
 def recognize_paddle(crop) -> Tuple[str, float]:
-    """Распознавание русского/кириллического текста через PaddleOCR (cyrillic_PP-OCRv5_mobile_rec)"""
+    """Распознавание русского/кириллического текста через PaddleOCR.
+
+    Модель — cyrillic_PP-OCRv5_mobile_rec."""
     try:
         result = list(_Engines.paddle_cyrillic().predict(crop, batch_size=1))
         if not result:
@@ -62,7 +64,9 @@ def recognize_paddle(crop) -> Tuple[str, float]:
 def recognize_paddle_latin(
     crop, model_size: str = DEFAULT_LATIN_MODEL_SIZE
 ) -> Tuple[str, float]:
-    """Распознавание латиницы через PaddleOCR PP-OCRv6 (опциональный движок для не-русского текста)"""
+    """Распознавание латиницы через PaddleOCR PP-OCRv6.
+
+    Опциональный движок для не-русского текста."""
     try:
         result = list(_Engines.paddle_latin(model_size).predict(crop, batch_size=1))
         if not result:
@@ -109,15 +113,18 @@ def recognize_tesseract(crop, lang: str = "rus") -> Tuple[str, float]:
         data = pytesseract.image_to_data(
             crop, lang=lang, config="--psm 7", output_type=Output.DICT
         )
+        # int(float(c)): часть сборок Tesseract отдаёт conf строкой вида
+        # "95.23", и голый int() на ней кидает ValueError (движок молча даёт
+        # пусто из-за внешнего try/except).
         words = [
-            (w, c)
+            (w, float(c))
             for w, c in zip(data["text"], data["conf"], strict=False)
-            if int(c) != -1 and w.strip()
+            if float(c) != -1 and w.strip()
         ]
         if not words:
             return "", 0.0
         text = " ".join(w for w, _ in words)
-        avg_conf = sum(int(c) for _, c in words) / len(words) / 100.0
+        avg_conf = sum(c for _, c in words) / len(words) / 100.0
         return text, avg_conf
     except Exception as e:
         print(f"Ошибка Tesseract: {e}")

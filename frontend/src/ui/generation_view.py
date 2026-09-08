@@ -8,6 +8,11 @@ from src.annotations import AnnotationManager
 from src.i18n import t
 
 BACKEND_URL = os.environ.get("CONSENSUS_BACKEND_URL", "http://127.0.0.1:8756")
+# /run и /models/status на бэкенде делают проверку готовности моделей
+# (tesseract subprocess + пинги VLM-эндпоинтов) — секунды, не миллисекунды,
+# поэтому у них отдельный таймаут. Короткие GET (/status, /jobs/active,
+# cancel) остаются на 5с.
+SLOW_TIMEOUT = 30
 ENGINES = (("paddle", "PaddleOCR"), ("surya", "SuryaOCR"), ("tesseract", "Tesseract"))
 ENGINE_LABELS = dict(ENGINES)
 ENGINE_KEYS = tuple(k for k, _ in ENGINES)
@@ -116,7 +121,7 @@ def _render_model_status():
     """Компактная таблица движок × (распознавание, детекция) вместо построчного списка"""
     if "models_status_cache" not in st.session_state:
         try:
-            resp = requests.get(f"{BACKEND_URL}/models/status", timeout=5)
+            resp = requests.get(f"{BACKEND_URL}/models/status", timeout=SLOW_TIMEOUT)
             resp.raise_for_status()
             st.session_state.models_status_cache = resp.json()
         except Exception as e:
@@ -168,15 +173,23 @@ def _adopt_active_job():
 
 
 def _format_backend_error(e: Exception) -> str:
-    """Достаёт JSON-поле detail из ответа FastAPI, если оно есть — иначе str(e)"""
+    """Достаёт JSON-поле detail из ответа FastAPI, если оно есть — иначе str(e).
+
+    Для 422 (ошибка валидации Pydantic) detail — список объектов, сводим их
+    в читаемую строку."""
     response = getattr(e, "response", None)
     if response is not None:
         try:
             detail = response.json().get("detail")
-            if detail:
-                return detail
         except ValueError:
-            pass
+            detail = None
+        if isinstance(detail, str) and detail:
+            return detail
+        if isinstance(detail, list) and detail:
+            return "; ".join(
+                str(item.get("msg", item)) if isinstance(item, dict) else str(item)
+                for item in detail
+            )
     return str(e)
 
 
@@ -199,7 +212,7 @@ def _render_go_to_manual_button(output_dir: str, diverged_count: int, key: str):
 def _submit_run(payload: dict):
     """POST /run + разбор ответа — общий для классической и VLM-формы."""
     try:
-        resp = requests.post(f"{BACKEND_URL}/run", json=payload, timeout=5)
+        resp = requests.post(f"{BACKEND_URL}/run", json=payload, timeout=SLOW_TIMEOUT)
         resp.raise_for_status()
         run_data = resp.json()
         st.session_state.consensus_job_id = run_data["job_id"]
@@ -426,12 +439,12 @@ def _render_job_tracker_section(output_dir: str):
                 )
 
 
-@st.experimental_fragment(run_every="2s")
+@st.fragment(run_every="2s")
 def _render_live_tracker():
-    """Опрашивает GET /status раз в 2с, пока задание не завершится (см. #st.experimental_fragment).
+    """Опрашивает GET /status раз в 2с, пока задание не завершится.
 
-    Именно experimental_fragment, а не st.fragment: последний появился в
-    streamlit 1.37, а в проекте зафиксирована 1.36.0 (frontend/requirements.txt).
+    st.fragment стабилен с streamlit 1.37 (пин в frontend/requirements.txt
+    поднят до >=1.37); прежний experimental_fragment убран в поздних 1.3x.
     """
     job_id = st.session_state.get("consensus_job_id")
     if not job_id:

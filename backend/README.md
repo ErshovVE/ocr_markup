@@ -71,20 +71,25 @@ use — no need to hardcode local paths.
 uvicorn backend.main:app --host 127.0.0.1 --port 8756
 ```
 
-The service only listens on `127.0.0.1` — no authentication and no
-restriction on the accepted `input_dir`/`output_dir` (any path the process
+The service only listens on `127.0.0.1` — no authentication and, by default,
+no restriction on the accepted `input_dir`/`output_dir` (any path the process
 can reach will be read/overwritten). This is a deliberate trade-off for a
-local, single-user spike (see the PRD, "Won't Building" section); don't run
-it on a shared/multi-user machine as-is.
+local, single-user spike (see the PRD, "Won't Building" section, and
+`docs/adr/0002`); don't run it on a shared/multi-user machine as-is.
+
+Set `OCR_DATA_ROOT` (env var) to a directory to confine `input_dir`/`output_dir`
+to it — `/run` and `/jobs/status_snapshot` then reject paths that resolve
+outside it. Docker Compose sets `OCR_DATA_ROOT=/data` and binds every port to
+`127.0.0.1`.
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int}` → `{"job_id": str, "warnings": [str]}`; 400 if `engines` is empty/contains an unknown engine, or `min_agree` is outside `[1, len(engines)]`; 409 if another job is already running (only one is supported at a time, see backend/jobs.py). `warnings` — engines from `engines` (and the detector) whose model isn't ready yet (`not_checked`/`checking`/`error` in `/models/status`) — the job starts anyway, the warning just explains why the first lines might "hang" downloading weights
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float (0..1), "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int}` → `{"job_id": str, "warnings": [str]}`; **422** if a field is out of range or the cross-field checks fail (`engines` empty/unknown, `min_agree` outside `[1, len(engines)]`, `preferred_model` not in `engines`, `iou_threshold` outside `(0, 1]`, …); 400 if `input_dir` doesn't exist, `output_dir` isn't writable, or a path is outside `OCR_DATA_ROOT`; 409 if another job is already running (only one is supported at a time, see backend/jobs.py). `warnings` — engines from `engines` (and the detector) whose model isn't ready yet (`not_checked`/`checking`/`error` in `/models/status`); the job starts anyway. Readiness is checked **before** the job is spawned, so a slow check delays the response rather than detaching from it.
 - `GET /jobs/active` → `{"job_id": str | null}` — id of the currently running job (or null); needed by the frontend to restore the progress tracker after a page reload
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — the progress tracker updates line by line as the job runs (see backend/jobs.py), not only when a whole file completes (a single Surya line can take up to ~20s to recognize); `diverged_count` — lines where 2+ engines are independently confident (score >= threshold) but disagreed on the text (see backend/consensus.py); `error_count`/`errors` — files/lines that failed with an exception or an engine timeout (see `ENGINE_CALL_TIMEOUT_SECONDS` below) — `error_count` grows unbounded, `errors` holds only the last `MAX_STORED_ERRORS` (default 50) messages
 - `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — unknown `job_id`, 409 — the job is no longer running. Cancellation is cooperative: the thread can't be killed directly, so the job stops at the nearest check between files/pages/lines, without losing what's already written; once stopped, `/status` will show `"status": "cancelled"`
 - `GET /jobs/status_snapshot?output_dir=...` → the same shape as `/status/{job_id}`, but keyed by `output_dir` instead of `job_id` — reads `output_dir/_job_status.json` (written on every processed file and on completion, see backend/jobs.py). Needed to find out how a job ended after a backend restart — `_jobs`/`job_id` in memory are already lost by then, but the on-disk snapshot survives a restart. 404 if there's no snapshot yet for that `output_dir`
-- `GET /result/{job_id}` → `{"output_dir": str, "good_count": int, "needs_review_count": int}`
+- `GET /result/{job_id}` → `{"output_dir": str, "good_count": int, "needs_review_count": int}`; 404 — unknown `job_id`; 409 if the job is still running / errored / cancelled (not `done`)
 - `GET /models/status` → `{"paddle": {...}, "surya": {...}, "paddle_detector": {...}, "surya_detector": {...}, "tesseract": {...}}`, each value — `{"status": "not_checked"|"checking"|"ready"|"error", "detail": str|null}`. `paddle`/`surya` — recognition models; `paddle_detector`/`surya_detector` — separate, independently downloaded line-detection models for those same engines; `tesseract` — shared (detection and recognition use the same system binary)
 - `POST /models/prepare` — `{"model": "paddle"|"surya"|"paddle_detector"|"surya_detector"}` → `{"status": "started"}` (asynchronously instantiates the engine in a background thread, which triggers downloading/caching the models; Tesseract isn't accepted here — it's installed manually, see the "Installation" section)
 
@@ -101,7 +106,10 @@ engine hangs (not just slow — recognize_* itself catches exceptions and
 returns an empty result, see `backend/recognizers.py`), that line is treated
 as empty rather than blocking the whole job. The timeout doesn't kill the
 engine's thread — it just stops waiting on it; the call itself may still
-finish in the background.
+finish in the background. A per-engine lock keeps the abandoned call from
+racing the next one inside the shared (non-thread-safe) predictor, and an
+engine that times out 3 times in a row is dropped for the rest of the job
+(an `errors[]` message says so; restart the backend to re-enable it).
 
 ## Crop naming (`crops/`)
 
@@ -213,9 +221,10 @@ counters.
 Bring the services up with `scripts/vlm/setup.sh --cpu` (or
 `scripts\vlm\setup.ps1 -Cpu` on Windows), or the compose profiles
 `--profile vlm-cpu` / `--profile vlm-gpu` (see `docs/docker.md`). Each engine
-also shows up in `GET /models/status` as `vlm_<id>` (a live `/v1/models` ping,
-re-checked every request — not cached like Paddle/Surya). `/models/prepare`
-is **not** supported for VLM engines.
+also shows up in `GET /models/status` as `vlm_<id>` (a `/v1/models` ping; the
+5 engines are pinged concurrently and the result is cached for a few seconds —
+`VLM_STATUS_CACHE_TTL_SECONDS` — so the polled endpoint doesn't block a worker
+on every request). `/models/prepare` is **not** supported for VLM engines.
 
 ### `debug.jsonl` for VLM
 

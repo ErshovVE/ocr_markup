@@ -68,7 +68,9 @@ def _detect_tesseract(numpy_image, lang: str) -> List[List[Tuple[int, int]]]:
         data = pytesseract.image_to_data(numpy_image, lang=lang, output_type=Output.DICT)
         lines = {}
         for i, word in enumerate(data["text"]):
-            if int(data["conf"][i]) == -1 or not word.strip():
+            # float(): часть сборок Tesseract отдаёт conf как "95.23" —
+            # голый int() кинул бы ValueError.
+            if float(data["conf"][i]) == -1 or not word.strip():
                 continue
             key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
             left, top = data["left"][i], data["top"][i]

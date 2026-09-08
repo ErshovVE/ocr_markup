@@ -2,6 +2,7 @@
 
 import base64
 import io
+import logging
 
 import numpy as np
 import pytest
@@ -52,14 +53,15 @@ def test_chat_returns_message_content(monkeypatch):
     assert fake.calls[0][0].endswith("/v1/chat/completions")
 
 
-def test_chat_swallows_network_error(monkeypatch, capsys):
+def test_chat_swallows_network_error(monkeypatch, caplog):
     fake = _FakeClient(error=ConnectionError("boom"))
     monkeypatch.setattr(vlm_client, "_client", lambda: fake)
 
-    result = vlm_client.chat("dots_ocr", "prompt", np.zeros((20, 20, 3), dtype=np.uint8))
+    with caplog.at_level(logging.WARNING, logger="backend.vlm_client"):
+        result = vlm_client.chat("dots_ocr", "prompt", np.zeros((20, 20, 3), dtype=np.uint8))
 
     assert result == ""
-    assert "Ошибка VLM dots_ocr" in capsys.readouterr().out
+    assert "Ошибка VLM dots_ocr" in caplog.text
 
 
 def test_chat_returns_empty_on_unexpected_payload_shape(monkeypatch):
@@ -82,3 +84,20 @@ def test_encode_image_downscales_when_longer_than_max_side():
     raw = base64.b64decode(uri.split(",", 1)[1])
     decoded = Image.open(io.BytesIO(raw))
     assert max(decoded.size) <= VLM_MAX_IMAGE_SIDE
+
+
+def test_downscale_page_caps_long_side_and_keeps_aspect():
+    tall = np.zeros((VLM_MAX_IMAGE_SIDE * 2, VLM_MAX_IMAGE_SIDE, 3), dtype=np.uint8)
+
+    out = vlm_client.downscale_page(tall)
+
+    assert max(out.shape[:2]) == VLM_MAX_IMAGE_SIDE
+    assert out.shape[0] == 2 * out.shape[1]  # соотношение сторон сохранено
+
+
+def test_downscale_page_leaves_small_image_untouched():
+    small = np.zeros((200, 300, 3), dtype=np.uint8)
+
+    out = vlm_client.downscale_page(small)
+
+    assert out.shape == (200, 300, 3)

@@ -61,9 +61,17 @@ _LATEX_UNICODE = {
     r"\gamma": "γ",
     r"\delta": "δ",
     r"\pi": "π",
-    r"\mu": "µ",
+    r"\mu": "μ",  # U+03BC GREEK SMALL LETTER MU (не U+00B5 MICRO SIGN)
     r"\Omega": "Ω",
 }
+# Замена макросов только когда за ними НЕ идёт буква — иначе "\pi" схлопнул бы
+# начало "\piecewise". Ключи отсортированы по убыванию длины, чтобы "\rightarrow"
+# матчился раньше "\right"-подобных префиксов.
+_LATEX_RE = re.compile(
+    "(?:"
+    + "|".join(re.escape(m) for m in sorted(_LATEX_UNICODE, key=len, reverse=True))
+    + r")(?![a-zA-Z])"
+)
 
 _FENCE_OPEN_RE = re.compile(r"^```[a-zA-Z]*\n?")
 _FENCE_CLOSE_RE = re.compile(r"\n?```$")
@@ -79,8 +87,7 @@ def postprocess_text(text: str) -> str:
     cleaned = _FENCE_OPEN_RE.sub("", cleaned)
     cleaned = _FENCE_CLOSE_RE.sub("", cleaned)
     cleaned = cleaned.strip()
-    for macro, uni in _LATEX_UNICODE.items():
-        cleaned = cleaned.replace(macro, uni)
+    cleaned = _LATEX_RE.sub(lambda m: _LATEX_UNICODE[m.group(0)], cleaned)
     cleaned = _WS_RE.sub(" ", cleaned)
     return cleaned.strip()
 
