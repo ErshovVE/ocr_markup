@@ -42,6 +42,7 @@ from backend.config import (
     DEFAULT_IOU_THRESHOLD,
     DEFAULT_VLM_MIN_AGREE,
     VLM_ENGINE_META,
+    VLM_MAX_IMAGE_SIDE,
 )
 from backend.pipeline import (
     _crop_paths,
@@ -147,12 +148,21 @@ def _native_model_input(engine: str, page: np.ndarray) -> np.ndarray:
     """Картинка для native-движка. Официальная предобработка Spotting у
     PaddleOCR-VL (VLM_ENGINE_META["upscale_below"]): если обе стороны меньше
     порога — увеличить ×2 (LANCZOS). Координаты ответа нормированы к [0, 1000],
-    поэтому масштаб картинки на их перевод в пиксели страницы не влияет."""
+    поэтому масштаб картинки на их перевод в пиксели страницы не влияет.
+
+    Увеличение сразу ограничено VLM_MAX_IMAGE_SIDE — одним ресайзом LANCZOS,
+    иначе vlm_client._encode_image второй раз ужал бы картинку другим фильтром.
+    Официально после ×2 картинку всё равно уменьшает процессор модели до
+    image_max_pixels (1605632), так что итоговый размер на входе модели тот же."""
     threshold = VLM_ENGINE_META[engine].get("upscale_below")
     height, width = page.shape[:2]
     if not threshold or width >= threshold or height >= threshold:
         return page
-    return np.array(Image.fromarray(page).resize((width * 2, height * 2), Image.Resampling.LANCZOS))
+    scale = min(2.0, VLM_MAX_IMAGE_SIDE / max(width, height))
+    if scale <= 1.0:
+        return page
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return np.array(Image.fromarray(page).resize(size, Image.Resampling.LANCZOS))
 
 
 def _safe_engine_lines(
@@ -212,19 +222,17 @@ def _write_page(
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]],
     on_error: Optional[Callable[[str], None]],
-    should_cancel: Optional[Callable[[], bool]],
     write_debug: Optional[Callable[[dict], None]],
 ) -> None:
     """Сводит строки всех моделей одной страницы (IoU-группировка + голосование)
     и пишет результат. Боксы — в координатах уменьшенной копии, кроп — из
-    оригинала в полном разрешении (см. _PageSpace)."""
+    оригинала в полном разрешении (см. _PageSpace). Отмену не проверяет:
+    модели уже отработали, запись страницы дешёвая — дописываем её целиком."""
     if not page_lines:
         return
     groups = vlm_consensus.group_by_iou(page_lines, iou_threshold)
     groups = _dedup_groups(groups, vlm_min_agree)
     for group in groups:
-        if _cancelled(should_cancel):
-            return
         try:
             bucket, text, engine, diverged = vlm_consensus.resolve(group, vlm_min_agree)
             crop = space.crop(group["poly"])
@@ -354,7 +362,8 @@ def run(
     максимума на диске — см. backend.pipeline._resume_img_count).
 
     should_cancel() проверяется перед каждым файлом/страницей И между VLM-
-    вызовами (один вызов на CPU может идти минуты).
+    вызовами (один вызов на CPU может идти минуты). После отмены строки, уже
+    полученные ранними моделями, всё равно записываются (без новых вызовов).
     """
     if not vlm_engines:
         raise ValueError("vlm_engines должен быть непустым подмножеством VLM_ENGINES")
@@ -401,20 +410,26 @@ def run(
         for engine in vlm_engines[:-1]:
             _collect_engine_pass(engine, files, collected, on_error, should_cancel)
 
+        # Финальный проход. После отмены модели больше не вызываются, но строки,
+        # уже накопленные ранними моделями (часы работы на CPU), дописываются:
+        # голосование честно отправит в needs_review то, чему не хватило согласия.
         final_engine = vlm_engines[-1]
         for file_path in files:
-            if _cancelled(should_cancel):
-                break
+            pending_pages = {page for path, page in collected if path == file_path}
+            if _cancelled(should_cancel) and not pending_pages:
+                continue
             for page_index, source_label, image in _iter_pages(file_path, on_error):
-                if _cancelled(should_cancel):
-                    break
+                stopping = _cancelled(should_cancel)
+                if stopping and page_index not in pending_pages:
+                    continue
                 space = _PageSpace(image)
                 page_lines = collected.pop((file_path, page_index), {})
-                lines = _safe_engine_lines(
-                    final_engine, space, source_label, on_error, should_cancel
-                )
-                if lines:
-                    page_lines[final_engine] = lines
+                if not stopping:
+                    lines = _safe_engine_lines(
+                        final_engine, space, source_label, on_error, should_cancel
+                    )
+                    if lines:
+                        page_lines[final_engine] = lines
                 # Порядок движков = порядок vlm_engines (приоритет опорного бокса
                 # в group_by_iou), а не порядок, в котором они отработали.
                 ordered = {e: page_lines[e] for e in vlm_engines if e in page_lines}
@@ -428,7 +443,6 @@ def run(
                     allocate_crop_path,
                     on_line_done,
                     on_error,
-                    should_cancel,
                     write_debug,
                 )
             if on_file_done:

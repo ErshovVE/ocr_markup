@@ -448,3 +448,49 @@ def test_layout_detector_is_never_called_concurrently(monkeypatch, one_png, tmp_
 
     assert overlaps == []
     assert good == 1
+
+
+def test_cancel_during_final_pass_still_writes_lines_of_earlier_models(monkeypatch, tmp_path):
+    """Отмена после прохода ранней модели не теряет её строки: они пишутся без
+    новых вызовов моделей (без второй модели согласия нет — needs_review)."""
+    for name in ("a.png", "b.png"):
+        Image.new("RGB", (PAGE_W, PAGE_H), "white").save(tmp_path / name)
+    calls = []
+    cancel = {"now": False}
+
+    def fake_chat(engine_id, prompt, image):
+        calls.append(engine_id)
+        if engine_id == "paddleocr_vl":
+            return _paddle("СТРОКА", 10, 10, 180, 45)
+        cancel["now"] = True  # отмена приходит во время первого вызова последней модели
+        return ""
+
+    monkeypatch.setattr(pipeline_vlm.vlm_client, "chat", fake_chat)
+    _no_save(monkeypatch)
+
+    events, good, review = _run(
+        tmp_path,
+        tmp_path / "out",
+        vlm_engines=["paddleocr_vl", "hunyuan_ocr"],
+        vlm_min_agree=2,
+        should_cancel=lambda: cancel["now"],
+    )
+
+    assert calls == ["paddleocr_vl", "paddleocr_vl", "hunyuan_ocr"]
+    assert (good, review) == (0, 2)
+
+
+def test_paddleocr_vl_upscale_is_capped_in_one_lanczos_resize(monkeypatch, tmp_path):
+    """1400x1000 → ×2 было бы 2800 px; сразу ограничиваем VLM_MAX_IMAGE_SIDE,
+    чтобы клиент не ужимал картинку второй раз другим фильтром."""
+    Image.new("RGB", (1400, 1000), "white").save(tmp_path / "page.png")
+    shapes = []
+    monkeypatch.setattr(
+        pipeline_vlm.vlm_client,
+        "chat",
+        lambda engine_id, prompt, image: shapes.append(image.shape) or "",
+    )
+
+    _run(tmp_path, tmp_path / "out", vlm_engines=["paddleocr_vl"])
+
+    assert shapes == [(1463, VLM_MAX_IMAGE_SIDE, 3)]
