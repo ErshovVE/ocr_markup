@@ -1,7 +1,7 @@
 """Юнит-тесты IoU-геометрии и консенсуса VLM (backend/vlm_geometry, vlm_consensus)."""
 
 from backend import vlm_consensus
-from backend.vlm_geometry import iou, merge_adjacent, rect_polygon
+from backend.vlm_geometry import clamped_bbox, iou, rect_polygon
 
 
 def _rect(x0, y0, x1, y1):
@@ -25,18 +25,18 @@ def test_iou_half_horizontal_shift():
     assert abs(value - 1 / 3) < 1e-9
 
 
-def test_merge_adjacent_joins_vertically_close_overlapping_boxes():
-    boxes = [_rect(0, 0, 100, 20), _rect(0, 22, 100, 42)]
+def test_clamped_bbox_uses_all_vertices_of_a_skewed_quad():
+    # Наклонный четырёхугольник: box[0]/box[2] — не левый-верх/правый-низ.
+    quad = [[10, 5], [100, 0], [95, 30], [5, 35]]
 
-    merged = merge_adjacent(boxes)
-
-    assert merged == [_rect(0, 0, 100, 42)]
+    assert clamped_bbox(quad, 1000, 1000) == (5, 0, 100, 35)
 
 
-def test_merge_adjacent_keeps_far_apart_boxes_separate():
-    boxes = [_rect(0, 0, 100, 20), _rect(0, 500, 100, 520)]
+def test_clamped_bbox_clamps_to_image_and_rounds_outward():
+    poly = [[-3.5, -1.2], [120.2, -1.2], [120.2, 50.1], [-3.5, 50.1]]
 
-    assert len(merge_adjacent(boxes)) == 2
+    assert clamped_bbox(poly, 100, 40) == (0, 0, 100, 40)
+    assert clamped_bbox([[1.7, 2.2], [9.1, 2.2], [9.1, 7.6], [1.7, 7.6]], 100, 100) == (1, 2, 10, 8)
 
 
 def test_group_by_iou_single_engine_one_group_per_box():

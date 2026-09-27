@@ -17,11 +17,10 @@ from collections import Counter
 from typing import Dict, List, Tuple
 
 from backend.vlm_adapters import postprocess_text
-from backend.vlm_geometry import iou, merge_adjacent, polygon_bbox, rect_polygon
+from backend.vlm_geometry import iou, polygon_bbox, rect_polygon
 
 __all__ = [
     "iou",
-    "merge_adjacent",
     "polygon_bbox",
     "rect_polygon",
     "group_by_iou",

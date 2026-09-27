@@ -1,14 +1,17 @@
-"""Чистая геометрия боксов для VLM-режима (backend/pipeline_vlm.py).
+"""Чистая геометрия боксов: VLM-режим (backend/pipeline_vlm.py) и вырезание
+кропов обоих путей (clamped_bbox → backend/pipeline.py::crop_by_polygon).
 
 Вынесено отдельным модулем без тяжёлых зависимостей, поэтому полностью
 юнит-тестируется (в отличие от backend/vlm_layout.py, который дергает
 backend.detector.Detector — см. docs/testing.md).
 
-Полигон везде — прямоугольник в том же формате, что у backend/detector.py:
-[[x0, y0], [x1, y0], [x1, y1], [x0, y1]] (box[0] — левый верх, box[2] —
-правый низ, как ожидает backend/pipeline.py::_process_boxes).
+Полигоны, которые строит этот модуль, — прямоугольники
+[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]. Входные полигоны (детекторы, текстовый
+слой PDF) могут быть произвольными четырёхугольниками — bbox берётся по всем
+вершинам (polygon_bbox/clamped_bbox).
 """
 
+import math
 from typing import List, Tuple
 
 Polygon = List[List[int]]
@@ -43,40 +46,23 @@ def iou(poly_a, poly_b) -> float:
     return inter / union
 
 
-def merge_adjacent(boxes, y_gap_ratio: float = 0.5, x_overlap_ratio: float = 0.3) -> List[Polygon]:
-    """Сливает вертикально-соседние боксы с горизонтальным перекрытием в один.
+def clamped_bbox(poly, width: int, height: int) -> Tuple[int, int, int, int]:
+    """Целочисленный bbox полигона, зажатый в границы картинки width×height.
 
-    Приём из Folio-OCR ("region merging") — для layout-стратегии (GLM-OCR)
-    каждый регион уходит в VLM отдельным HTTP-вызовом, поэтому чем меньше
-    регионов, тем меньше вызовов. Итеративно, пока есть что сливать: два бокса
-    объединяются, если вертикальный зазор между ними не больше y_gap_ratio от
-    меньшей высоты И горизонтальное перекрытие не меньше x_overlap_ratio от
-    меньшей ширины.
-    """
-    rects = [list(polygon_bbox(b)) for b in boxes]
-    changed = True
-    while changed:
-        changed = False
-        merged: List[List[float]] = []
-        used = [False] * len(rects)
-        for i in range(len(rects)):
-            if used[i]:
-                continue
-            ax0, ay0, ax1, ay1 = rects[i]
-            for j in range(i + 1, len(rects)):
-                if used[j]:
-                    continue
-                bx0, by0, bx1, by1 = rects[j]
-                min_h = max(1.0, min(ay1 - ay0, by1 - by0))
-                min_w = max(1.0, min(ax1 - ax0, bx1 - bx0))
-                v_gap = max(ay0, by0) - min(ay1, by1)
-                x_overlap = min(ax1, bx1) - max(ax0, bx0)
-                if v_gap <= y_gap_ratio * min_h and x_overlap >= x_overlap_ratio * min_w:
-                    ax0, ay0 = min(ax0, bx0), min(ay0, by0)
-                    ax1, ay1 = max(ax1, bx1), max(ay1, by1)
-                    used[j] = True
-                    changed = True
-            used[i] = True
-            merged.append([ax0, ay0, ax1, ay1])
-        rects = merged
-    return [rect_polygon(x0, y0, x1, y1) for x0, y0, x1, y1 in rects]
+    Общий для всех путей вырезания кропа (см. backend/pipeline.py::crop_by_polygon).
+    bbox — по ВСЕМ вершинам, а не box[0]/box[2]: у наклонного четырёхугольника
+    детектора Paddle эти две вершины не обязаны быть левым-верхним/правым-нижним.
+    Зажим обязателен: отрицательный старт numpy-среза считается с конца массива
+    и даёт кроп не с того места. floor/ceil — чтобы дробные координаты (текстовый
+    слой PDF, Surya) не срезали край строки."""
+    x0, y0, x1, y1 = polygon_bbox(poly)
+    x0 = max(0, min(math.floor(x0), width))
+    y0 = max(0, min(math.floor(y0), height))
+    x1 = max(0, min(math.ceil(x1), width))
+    y1 = max(0, min(math.ceil(y1), height))
+    return x0, y0, x1, y1
+
+
+def scale_polygon(poly, sx: float, sy: float) -> Polygon:
+    """Полигон, масштабированный по осям (перевод между пространствами страницы)."""
+    return [[p[0] * sx, p[1] * sy] for p in poly]

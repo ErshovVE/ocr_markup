@@ -14,7 +14,7 @@
   <a href="docs/ru/README.md">🇷🇺 Русский</a>
 </p>
 
-A two-service Python toolkit for building OCR training data: a **Streamlit** app for manually labeling image→text pairs, and a **FastAPI** backend that auto-labels a batch of documents by running three OCR engines in parallel and voting on the result.
+A two-service Python toolkit for building OCR training data: a **Streamlit** app for manually labeling image→text pairs, and a **FastAPI** backend that auto-labels a batch of documents — either by running three classic OCR engines per line and voting on the result, or (**VLM mode**) by sending whole pages to OpenAI-compatible vision-language models.
 
 > Local, single-user tool — no auth, no multi-tenant deployment. See [`backend/README.md`](backend/README.md) and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the operational scope this is designed for.
 
@@ -28,7 +28,7 @@ A two-service Python toolkit for building OCR training data: a **Streamlit** app
 - Backup history with one-click restore
 
 **🤖 Auto-labeling (OCR consensus)**
-- Runs **PaddleOCR + SuryaOCR + Tesseract** on every detected text line and votes on the result (majority vote → preferred-engine tiebreak → best score)
+- Runs **PaddleOCR + SuryaOCR + Tesseract** on every detected text line (batched per page, engines in parallel) and votes on the result: with 2-of-N schemes a line is "good" only if engines return character-for-character identical text
 - Selectable line-detection engine, adjustable confidence threshold
 - Direct PDF text-layer extraction — skips OCR entirely when a PDF already has one
 - Live progress tracker while a job runs, with cooperative cancellation
@@ -36,6 +36,11 @@ A two-service Python toolkit for building OCR training data: a **Streamlit** app
 - Per-file/line errors are visible in the UI, not just backend logs
 - Job status survives a backend restart (disk snapshot), even though the in-memory tracker doesn't
 - Lines where two engines disagreed are flagged **"disputed"** and can be reviewed with each engine's individual text/confidence shown side by side
+
+**🧠 Auto-labeling (VLM mode)**
+- Alternative path (`mode="vlm"`): OCR vision-language models — **PaddleOCR-VL 1.6, HunyuanOCR, GLM-OCR, dots.ocr, Unlimited-OCR**. PaddleOCR-VL and HunyuanOCR return text lines with boxes for the whole page; GLM-OCR, dots.ocr and Unlimited-OCR read line crops found by the line detector
+- With several models selected, lines are matched across models by box IoU and voted on (`vlm_min_agree`); same `good.txt`/`needs_review.txt`/`debug.jsonl` output as the classic path
+- One engine for all models — **llama.cpp**, on CPU or GPU, one model in memory at a time; an optional Docker Compose profile (`vlm-cpu` / `vlm-gpu`) or `scripts/vlm/setup.{sh,ps1}`; readiness is shown in the "📦 Models" tab
 
 **🌐 Localized UI**
 - Interface strings are localized (RU/EN); switch languages any time via the flag buttons at the top of the page
@@ -48,6 +53,13 @@ docker compose up --build
 ```
 Frontend: http://localhost:8501 · Backend: http://localhost:8756
 Put your working data under `./data` on the host — it's mounted at `/data` inside both containers; enter paths like `/data/your-folder` in the UI. Details: [`docs/docker.md`](docs/docker.md).
+
+**+ VLM mode (optional)** — the model server (llama.cpp, one engine for all five models) is *not* started by plain `docker compose up`; enable it with one of the profiles:
+```bash
+docker compose --profile vlm-cpu up -d --build   # CPU
+docker compose --profile vlm-gpu up -d --build   # GPU (NVIDIA + nvidia-container-toolkit)
+```
+or `./scripts/vlm/setup.sh --cpu|--gpu|--native` (Linux/macOS/WSL) / `.\scripts\vlm\setup.ps1 -Cpu|-Gpu|-Native` (Windows). The first start downloads several GB of GGUF weights (`VLM_MODELS` picks a subset, see `.env.example`). Details: [`docs/docker.md#vlm-mode--optional-companion-services`](docs/docker.md#vlm-mode--optional-companion-services), API: [`backend/README.md`](backend/README.md#vlm-mode-modevlm).
 
 **Native (no Docker)**:
 ```bash
@@ -80,7 +92,9 @@ frontend/            Streamlit labeling app
   tests/
 backend/              FastAPI OCR-consensus service
   main.py, jobs.py, pipeline.py, detector.py, recognizers.py, consensus.py, ...
+  pipeline_vlm.py, vlm_client.py, vlm_adapters.py, vlm_consensus.py, vlm_layout.py, vlm_geometry.py   (VLM mode)
   tests/
+scripts/vlm/          models.ini (llama.cpp presets), fetch_models.py, setup.sh / setup.ps1
 docs/                 architecture, Docker, testing, runbook — see below
   ru/                   Russian translations of everything under docs/, backend/README.md, and this README
 ```
@@ -92,8 +106,8 @@ docs/                 architecture, Docker, testing, runbook — see below
 | Doc | Covers |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | Module map, on-disk data formats, known fragile couplings (frontend side) |
-| [`backend/README.md`](backend/README.md) | Full backend API reference, PDF handling, model-readiness checks |
-| [`docs/docker.md`](docs/docker.md) | Docker Compose setup, volumes, individual `docker build`/`run` |
+| [`backend/README.md`](backend/README.md) | Full backend API reference (incl. VLM mode), PDF handling, model-readiness checks |
+| [`docs/docker.md`](docs/docker.md) | Docker Compose setup, volumes, VLM compose profiles, individual `docker build`/`run` |
 | [`docs/testing.md`](docs/testing.md) | What's unit-tested vs. not, and why; lint config |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Deploy/redeploy procedure, health checks, common issues, rollback |
 

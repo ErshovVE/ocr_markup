@@ -188,3 +188,15 @@ def test_status_dict_returns_a_copy_of_errors_not_the_live_list():
     snapshot["errors"].append("mutated by caller")
 
     assert state.errors == ["a", "b"]
+
+
+def test_prune_keeps_only_the_newest_finished_jobs(monkeypatch):
+    monkeypatch.setattr(jobs, "MAX_FINISHED_JOBS", 2)
+    for i in range(4):
+        jobs._jobs[f"done-{i}"] = jobs.JobState(status="done")
+    jobs._jobs["running"] = jobs.JobState(status="running")
+
+    with jobs._lock:
+        jobs._prune_finished_jobs()
+
+    assert list(jobs._jobs) == ["done-2", "done-3", "running"]

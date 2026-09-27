@@ -33,6 +33,17 @@ docker compose up -d --build --force-recreate
 Frontend: http://localhost:8501, backend: http://localhost:8756. Подробности
 монтирования `./data` и volume'ов моделей — в `docs/docker.md`.
 
+С серверами VLM-моделей (режим VLM-авторазметки — по умолчанию не поднимаются):
+```bash
+docker compose --profile vlm-cpu up -d --build --force-recreate   # CPU: llama.cpp
+docker compose --profile vlm-gpu up -d --build --force-recreate   # или GPU: CUDA-сборка llama.cpp
+```
+Один движок (llama.cpp) обслуживает все пять моделей, в памяти — не больше одной.
+Тот же флаг `--profile` нужно повторять в `docker compose down`/`logs`/`ps`,
+иначе сервисы из профилей игнорируются. Первый запуск скачивает несколько ГБ
+весов (`vlm-models` — одноразовый init-контейнер, завершается по окончании).
+Подробности — `docs/docker.md` (раздел «VLM-режим»).
+
 **`--build --force-recreate` обязательны при любом изменении кода**, просто
 `docker compose up -d` недостаточно: `docker-compose.yml` монтирует volume'ом
 только `./data:/data`, исходники (`frontend/src`, `app.py`, весь `backend/`)
@@ -63,6 +74,9 @@ curl http://127.0.0.1:8756/models/status
 ```
 Ответ: `{"paddle": {...}, "surya": {...}, "tesseract": {...}}`, каждое —
 `{"status": "not_checked"|"checking"|"ready"|"error", "detail": ...}`.
+Кроме того, в ответе есть по ключу `vlm_<id>` на каждый VLM-движок
+(`vlm_paddleocr_vl`, `vlm_glm_ocr`, `vlm_hunyuan_ocr`, `vlm_dots_ocr`,
+`vlm_unlimited_ocr`) — пинг `/v1/models` этого движка, кэшируется на несколько секунд.
 Frontend опрашивает этот же эндпоинт в `generation_view.py::_render_model_status`.
 
 Job-статус конкретного запуска: `GET /status/{job_id}` →
@@ -88,6 +102,8 @@ Job-статус конкретного запуска: `GET /status/{job_id}` �
 | Job "застрял" в `running` после перезапуска backend'а | Статус задания хранится в памяти процесса (`backend/jobs.py::_jobs`), теряется при рестарте | Сами `good.txt`/`needs_review.txt`/`debug.jsonl`/`crops/` не теряются (пишутся на диск построчно) — узнать, чем закончилось задание, можно через `GET /jobs/status_snapshot?output_dir=...` (снэпшот статуса, переживающий рестарт) |
 | Задание нужно остановить вручную | — | `POST /jobs/{job_id}/cancel` (или кнопка «⏹ Отменить» в UI). Отмена кооперативная — проверяется между файлами/страницами/строками, не мгновенная; уже записанное не теряется |
 | Один движок (Paddle/Surya/Tesseract) стабильно таймаутится на конкретных строках, `error_count` растёт | Ожидаемо для по-настоящему зависшего вызова — `_run_engines_with_timeout` (`backend/pipeline.py`) отдаёт этой строке пустой результат и продолжает; каждый вызов — одноразовый поток, зависание не отнимает мощность у будущих строк/job'ов | Смотреть `errors` в `/status`/`/jobs/status_snapshot` для конкретных сообщений. Если весь job выглядит замершим (не растёт `docs_processed` минутами) — это уже не про таймаут движка, смотреть `docker logs ocr_markup-backend-1` |
+| `vlm_<id> == "error"`, detail «эндпоинт недоступен» | llama-server не запущен (не включён compose-профиль), `vlm-models` ещё качает веса, или `VLM_ENDPOINT` указывает не туда | `docker compose --profile vlm-cpu ps` / `logs vlm-models llama-vlm`; под Docker адрес должен быть `http://llama-vlm:8080`, а не `localhost` — для запуска в Docker уберите `VLM_ENDPOINT` из `.env` |
+| `vlm_<id> == "error"`, модель «не загрузилась» или «нет в пресетах» | GGUF не скачан (исключён через `VLM_MODELS` или загрузка прервалась) либо не хватает RAM | `docker compose logs llama-vlm`; перезапустить `docker compose --profile vlm-cpu up vlm-models`; на слабой машине держите `VLM_MODELS_MAX=1` |
 | Горячие клавиши ←/→ не работают | JS-обработчик матчится по буквальному тексту кнопок, легко ломается косметическими изменениями | См. хрупкое место в `docs/architecture.md`; проверить, не изменился ли текст кнопок в `editor_view.py` |
 | Повёрнутое изображение показывает старую превьюшку | Кэш `st.cache_data` не сброшен корректно | См. хрупкое место в `docs/architecture.md` (связка `image_ops.py`) |
 | `POST /run` принимает произвольный путь и перезаписывает файлы там | Осознанное отсутствие валидации путей — локальный однопользовательский спайк без аутентификации | Не запускать backend на общей/многопользовательской машине как есть (см. `backend/README.md`) |

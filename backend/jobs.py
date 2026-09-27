@@ -32,6 +32,10 @@ SNAPSHOT_FILENAME = "_job_status.json"
 # Сколько последних сообщений об ошибках/таймаутах хранить целиком — сам
 # error_count при этом растёт без ограничения, обрезается только список.
 MAX_STORED_ERRORS = 50
+# Сколько завершённых заданий держать в _jobs (для GET /status/{job_id}) —
+# раньше словарь только рос за время жизни процесса. Старые завершённые
+# вытесняются при старте нового; их итог остаётся в снэпшоте на диске.
+MAX_FINISHED_JOBS = 100
 
 
 @dataclass
@@ -244,6 +248,7 @@ def start_job(
     with _lock:
         if _active_job_id is not None:
             raise RuntimeError(f"Уже выполняется задание {_active_job_id}")
+        _prune_finished_jobs()
         _jobs[job_id] = JobState(status="running")
         _active_job_id = job_id
     thread = threading.Thread(
@@ -269,6 +274,14 @@ def start_job(
     )
     thread.start()
     return job_id
+
+
+def _prune_finished_jobs() -> None:
+    """Оставляет в _jobs не более MAX_FINISHED_JOBS последних завершённых
+    заданий (dict хранит порядок вставки = порядок старта). Вызывать под _lock."""
+    finished = [job_id for job_id, state in _jobs.items() if state.status != "running"]
+    for job_id in finished[: max(0, len(finished) - MAX_FINISHED_JOBS)]:
+        del _jobs[job_id]
 
 
 def get_job(job_id: str) -> Optional[JobState]:

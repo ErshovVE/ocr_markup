@@ -6,6 +6,7 @@ pypdfium2 — лёгкая самодостаточная библиотека (
 docs/testing.md).
 """
 
+import ctypes
 from typing import List, Tuple
 
 import numpy as np
@@ -32,13 +33,40 @@ def render_page(page: pdfium.PdfPage, dpi: int = PDF_RENDER_DPI) -> np.ndarray:
     return np.array(bitmap.to_pil().convert("RGB"))
 
 
-def _pdf_x_to_pix(x: float, page_width: float, image_width: int) -> float:
-    return x / page_width * image_width
+def _page_to_pixel(page: pdfium.PdfPage, x: float, y: float, width: int, height: int):
+    """Точка PDF user space → пиксель картинки render_page() размера width×height.
+
+    Через pdfium FPDF_PageToDevice: он применяет ту же матрицу, что и рендер,
+    включая /Rotate страницы. Прежнее ручное «x/page_width, page_height - y»
+    не знало о повороте — на страницах с /Rotate 90/180/270 боксы уезжали
+    в другое место листа (кроп не той области под текстом строки)."""
+    device_x, device_y = ctypes.c_int(), ctypes.c_int()
+    pdfium.raw.FPDF_PageToDevice(page.raw, 0, 0, width, height, 0, x, y, device_x, device_y)
+    return device_x.value, device_y.value
 
 
-def _pdf_y_to_pix(y: float, page_height: float, image_height: int) -> float:
-    # PDF: ось Y растёт снизу вверх; растровое изображение: сверху вниз
-    return image_height - (y / page_height * image_height)
+def _pixel_rect(page: pdfium.PdfPage, left, bottom, right, top, width: int, height: int):
+    """Прямоугольник PDF user space → осевой прямоугольник в пикселях
+    [[x0,y0],[x1,y0],[x1,y1],[x0,y1]] (углы после поворота нормализуются)."""
+    corners = [
+        _page_to_pixel(page, px, py, width, height)
+        for px, py in ((left, bottom), (right, bottom), (right, top), (left, top))
+    ]
+    xs = [c[0] for c in corners]
+    ys = [c[1] for c in corners]
+    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+
+def _center_inside(box, left, bottom, right, top) -> bool:
+    """Центр charbox внутри границ объекта. Строгое «charbox целиком внутри»
+    отбрасывало символы из-за float-погрешности pdfium (край глифа 97.61600494
+    против границы объекта 97.61599731): "HELLO" извлекалось как "HELL", а
+    если такой символ был в середине строки — текст терял букву, которую
+    кроп при этом показывает (неверная подпись в good.txt)."""
+    cx = (box[0] + box[2]) / 2
+    cy = (box[1] + box[3]) / 2
+    return left <= cx <= right and bottom <= cy <= top
 
 
 def extract_page_text_boxes(
@@ -55,9 +83,8 @@ def extract_page_text_boxes(
     Возвращает список (box, text), box — [[x0,y0],[x1,y0],[x1,y1],[x0,y1]]
     в пиксельных координатах изображения, отрендеренного через render_page()
     ДЛЯ ЭТОЙ ЖЕ страницы этим же image_width/image_height (координаты зависят
-    от масштаба рендера).
+    от масштаба рендера; поворот страницы учитывается, см. _page_to_pixel).
     """
-    page_width, page_height = page.get_size()
     textpage = page.get_textpage()
     try:
         char_boxes = [textpage.get_charbox(i) for i in range(textpage.count_chars())]
@@ -68,7 +95,7 @@ def extract_page_text_boxes(
             indices = [
                 i
                 for i, box in enumerate(char_boxes)
-                if box[0] >= left_b and box[2] <= right_b and box[1] >= bottom_b and box[3] <= top_b
+                if _center_inside(box, left_b, bottom_b, right_b, top_b)
             ]
             if not indices:
                 continue
@@ -83,12 +110,8 @@ def extract_page_text_boxes(
             right = max(b[2] for b in boxes)
             top = max(b[3] for b in boxes)
 
-            x0 = _pdf_x_to_pix(left, page_width, image_width)
-            y0 = _pdf_y_to_pix(top, page_height, image_height)
-            x1 = _pdf_x_to_pix(right, page_width, image_width)
-            y1 = _pdf_y_to_pix(bottom, page_height, image_height)
-
-            result.append(([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], text))
+            rect = _pixel_rect(page, left, bottom, right, top, image_width, image_height)
+            result.append((rect, text))
 
         return result
     finally:

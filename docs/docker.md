@@ -6,8 +6,9 @@
   <a href="ru/docker.md">🇷🇺 Русский</a>
 </p>
 
-Two independent services — they don't talk to each other over the network,
-each has its own Dockerfile:
+Two services, each with its own Dockerfile. The frontend reaches the backend
+over the compose network (`CONSENSUS_BACKEND_URL=http://backend:8756`); the
+optional VLM model servers are described [below](#vlm-mode--optional-companion-services):
 
 | Service | Dockerfile | What's inside | Port |
 |---|---|---|---|
@@ -41,46 +42,48 @@ recreation.
 
 ## VLM mode — optional companion services
 
-The `mode="vlm"` auto-labeling path (see `backend/README.md`) needs external
-model services. They are declared in `docker-compose.yml` under **profiles**,
-so `docker compose up` does **not** start them by default.
+The `mode="vlm"` auto-labeling path (see `backend/README.md`) needs a model
+server. It's **one engine for all five models — llama.cpp `llama-server`** in
+router mode, declared in `docker-compose.yml` under **profiles**, so
+`docker compose up` does **not** start it by default. Pick **one** profile (they
+share the port and the `llama-vlm` name):
 
 ```bash
-# CPU engines (Ollama: glm-ocr + PaddleOCR-VL, llama-server: HunyuanOCR)
-docker compose --profile vlm-cpu up -d
-
-# + GPU engines (vLLM: dots.ocr + Unlimited-OCR; needs nvidia-container-toolkit)
-docker compose --profile vlm-cpu --profile vlm-gpu up -d
+docker compose --profile vlm-cpu up -d      # CPU (llama.cpp:server)
+docker compose --profile vlm-gpu up -d      # GPU (llama.cpp:server-cuda; needs nvidia-container-toolkit)
 ```
 
-or the wrapper scripts (they also print the `*_ENDPOINT` values and self-check
-`GET /models/status`):
+or the wrapper scripts (they also self-check `GET /models/status`):
 
 ```bash
 ./scripts/vlm/setup.sh --cpu            # Linux / macOS / WSL
 ./scripts/vlm/setup.sh --gpu
+./scripts/vlm/setup.sh --native         # no Docker: GGUF into .vlm/ + local llama-server
 ```
 ```powershell
 .\scripts\vlm\setup.ps1 -Cpu            # Windows
 .\scripts\vlm\setup.ps1 -Gpu
+.\scripts\vlm\setup.ps1 -Native
 ```
 
-| Service | Profile | Port | Serves |
+| Service | Profile | Port | What it does |
 |---|---|---|---|
-| `ollama` + `ollama-pull` | `vlm-cpu` | 11434 | `glm_ocr`, `paddleocr_vl` |
-| `llama-hunyuan` | `vlm-cpu` | 8081 | `hunyuan_ocr` |
-| `vllm-dots` | `vlm-gpu` | 8082 | `dots_ocr` |
-| `vllm-unlimited` | `vlm-gpu` | 8083 | `unlimited_ocr` |
+| `vlm-models` | `vlm-cpu`, `vlm-gpu` | — | one-shot init: downloads the GGUF files into the `vlm-models` volume (pinned HF commits, `scripts/vlm/fetch_models.py`) and patches PaddleOCR-VL's mmproj for `Spotting:` |
+| `llama-vlm` | `vlm-cpu` | 8080 | `llama-server --models-preset scripts/vlm/models.ini --models-max 1` |
+| `llama-vlm-gpu` | `vlm-gpu` | 8080 | the same on the CUDA build, network alias `llama-vlm` |
 
-The `backend` service already gets `GLM_OCR_ENDPOINT` / `PADDLEOCR_VL_ENDPOINT`
-/ `HUNYUAN_OCR_ENDPOINT` / `DOTS_OCR_ENDPOINT` / `UNLIMITED_OCR_ENDPOINT`
-pointing at these services (override via `.env` — see `.env.example`). First
-start pulls multi-GB weights, so give `ollama-pull` / `llama-hunyuan` time
-before running a VLM job. Check readiness in `GET /models/status` (`vlm_*`
-keys) or the frontend "📦 Models" tab.
-
-The `ollama-pull` container is a one-shot init (`restart: "no"`) — it exits
-once `ollama pull` finishes.
+- The `backend` service already gets `VLM_ENDPOINT=http://llama-vlm:8080`;
+  don't put a `localhost` value into `.env` (see `.env.example`).
+- **At most one model in memory** (`--models-max 1`, `VLM_MODELS_MAX`): the model
+  is loaded on the first request for it and evicts the previous one. The backend
+  processes the folder model by model, so a VLM job switches models only
+  `len(vlm_engines)` times.
+- `VLM_MODELS=glm-ocr,dots-ocr` downloads only some models (preset names from
+  `scripts/vlm/models.ini`); the rest show as `error` in `/models/status`.
+- The first start downloads several GB (Q8_0 weights). `llama-vlm` starts only
+  after `vlm-models` has finished (`docker compose logs -f vlm-models`). Check
+  readiness in `GET /models/status` (`vlm_*` keys) or the frontend "📦 Models" tab.
+- GPU: `VLM_GPU` picks the card (default 0).
 
 ## Building and running individually
 
@@ -112,9 +115,10 @@ docker run --rm -p 8756:8756 -v "$(pwd)/data:/data" ocr-markup-backend
   production data.
 - The backend image is heavy (PaddleOCR + SuryaOCR + system Tesseract) — the
   first build and first run (downloading ML models) can take a while.
-- VLM companion images (`vlm-cpu`/`vlm-gpu` profiles) use floating tags and
-  `--trust-remote-code`; pin digests/revisions before relying on them (see the
-  comment block in `docker-compose.yml`).
+- The VLM model server is pinned: llama.cpp image by build number
+  (`server-b11206`), GGUF files by Hugging Face commit. llama.cpp doesn't execute
+  code from model repositories. Unlimited-OCR's GGUF is a community build — the
+  only one available.
 - The frontend image doesn't include `predict.py`/`predict.ipynb` or the
   PyInstaller wiring (`frontend/wrapper.py`, `frontend/build_exe.py`,
   `frontend/requirements-build.txt`) — they aren't part of running the app.

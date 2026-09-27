@@ -153,10 +153,9 @@ STRINGS = {
         "vlm_models_help": "Несколько моделей сводятся в консенсус по совпадению боксов (IoU).",
         "vlm_min_agree_label": "Согласование (минимум движков на строку)",
         "iou_threshold_label": "Порог IoU совпадения боксов",
-        "vlm_gpu_suffix": " (GPU)",
-        "vlm_section_header": "**Модели VLM** (внешние сервисы)",
-        "vlm_endpoint_missing": "{name}: сервис не отвечает — задайте *_ENDPOINT "
-        "и поднимите модель (scripts/vlm/)",
+        "vlm_section_header": "**Модели VLM** (llama.cpp)",
+        "vlm_endpoint_missing": "{name}: модель недоступна — поднимите llama.cpp "
+        "(docker compose --profile vlm-cpu, см. scripts/vlm/)",
         "choose_vlm_models_error": "Выберите хотя бы одну модель VLM",
     },
     "en": {
@@ -308,10 +307,9 @@ STRINGS = {
         "vlm_models_help": "Multiple models are reconciled by box overlap (IoU).",
         "vlm_min_agree_label": "Agreement (min engines per line)",
         "iou_threshold_label": "Box-match IoU threshold",
-        "vlm_gpu_suffix": " (GPU)",
-        "vlm_section_header": "**VLM models** (external services)",
-        "vlm_endpoint_missing": "{name}: service unreachable — set *_ENDPOINT "
-        "and start the model (scripts/vlm/)",
+        "vlm_section_header": "**VLM models** (llama.cpp)",
+        "vlm_endpoint_missing": "{name}: model unavailable — start llama.cpp "
+        "(docker compose --profile vlm-cpu, see scripts/vlm/)",
         "choose_vlm_models_error": "Choose at least one VLM model",
     },
 }

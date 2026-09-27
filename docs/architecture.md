@@ -33,15 +33,18 @@ shared):
 
 | Path | Module | How it works |
 |---|---|---|
-| `mode="consensus"` (default) | `backend/pipeline.py` | per line: detector → line crop → `recognize_*` → `consensus.vote` |
-| `mode="vlm"` | `backend/pipeline_vlm.py` | per page: one HTTP call to a vision-language model → response parser → IoU grouping of several models |
+| `mode="consensus"` (default) | `backend/pipeline.py` | per page: detector → line crops → every engine gets the batch of crops (`recognize_*_batch`, engines in parallel) → `consensus.vote` per line |
+| `mode="vlm"` | `backend/pipeline_vlm.py` | model by model over the whole folder: page (or detector line crop) → HTTP call to the model → response parser; the last model's pass does the IoU grouping of all models per page and writes |
 
 VLM-mode modules: `vlm_client.py` (OpenAI-compatible HTTP), `vlm_adapters.py`
 (prompts + per-model response parsers), `vlm_geometry.py` (`iou` /
-`merge_adjacent` / `rect_polygon`), `vlm_consensus.py` (IoU box grouping +
-majority text vote), `vlm_layout.py` (region boxes for GLM via the `paddle`
-detector — not unit-tested, like `detector.py`). Provisioning of the external
-model services lives in `scripts/vlm/` and the `vlm-cpu`/`vlm-gpu` compose
+`clamped_bbox` / `rect_polygon`; `clamped_bbox` also backs
+`pipeline.crop_by_polygon`, the crop helper of both paths), `vlm_consensus.py`
+(IoU box grouping + majority text vote), `vlm_layout.py` (line boxes for the
+`layout` engines GLM-OCR/dots.ocr/Unlimited-OCR via the `paddle` detector — not
+unit-tested, like `detector.py`). All five models are served by one llama.cpp
+`llama-server` in router mode (at most one model in memory); presets, model
+download and setup live in `scripts/vlm/` and the `vlm-cpu`/`vlm-gpu` compose
 profiles.
 
 ## Data formats

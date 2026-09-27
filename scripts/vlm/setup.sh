@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Провижининг companion-сервисов VLM-режима (Linux / macOS / WSL).
+# Поднимает llama.cpp для VLM-режима (Linux / macOS / WSL). Один движок на все
+# 5 моделей: llama-server в router-режиме, в памяти не больше одной модели.
 #
-#   ./scripts/vlm/setup.sh --cpu     # (по умолчанию) Ollama + llama-server через docker compose
-#   ./scripts/vlm/setup.sh --gpu     # + vLLM для dots.ocr / Unlimited-OCR (нужен nvidia-container-toolkit)
-#   ./scripts/vlm/setup.sh --native  # без docker: ollama pull + llama-server в фоне
+#   ./scripts/vlm/setup.sh --cpu     # (по умолчанию) docker compose --profile vlm-cpu
+#   ./scripts/vlm/setup.sh --gpu     # docker compose --profile vlm-gpu (нужен nvidia-container-toolkit)
+#   ./scripts/vlm/setup.sh --native  # без docker: скачать GGUF в .vlm/ и запустить llama-server
 #   ./scripts/vlm/setup.sh --cpu --backend-url http://localhost:8756
 #
-# В конце печатает строки `export *_ENDPOINT=...` и дергает GET {backend}/models/status.
+# VLM_MODELS=glm-ocr,dots-ocr — скачать только часть моделей (имена — из scripts/vlm/models.ini).
+# В конце дергает GET {backend}/models/status для самопроверки.
 set -euo pipefail
 
 MODE="cpu"
@@ -25,18 +27,6 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-print_endpoints() {
-  echo
-  echo "# Добавьте в окружение backend'а (или в .env):"
-  echo "export GLM_OCR_ENDPOINT=${GLM_OCR_ENDPOINT:-http://localhost:11434}"
-  echo "export PADDLEOCR_VL_ENDPOINT=${PADDLEOCR_VL_ENDPOINT:-http://localhost:11434}"
-  echo "export HUNYUAN_OCR_ENDPOINT=${HUNYUAN_OCR_ENDPOINT:-http://localhost:8081}"
-  if [ "$MODE" = "gpu" ]; then
-    echo "export DOTS_OCR_ENDPOINT=${DOTS_OCR_ENDPOINT:-http://localhost:8082}"
-    echo "export UNLIMITED_OCR_ENDPOINT=${UNLIMITED_OCR_ENDPOINT:-http://localhost:8083}"
-  fi
-}
-
 selfcheck() {
   echo
   echo "== GET ${BACKEND_URL}/models/status =="
@@ -44,37 +34,41 @@ selfcheck() {
     || echo "(backend недоступен на ${BACKEND_URL} — запустите его и повторите проверку)"
 }
 
+run_compose() {
+  local profile="$1"
+  command -v docker >/dev/null || { echo "docker не найден" >&2; exit 1; }
+  docker compose --profile "$profile" up -d --force-recreate
+  echo "Жду загрузки моделей (init-контейнер vlm-models) — первый раз это долго..."
+  docker compose logs -f vlm-models || true
+  echo
+  echo "# Backend в docker compose уже смотрит на llama-vlm по имени (http://llama-vlm:8080)."
+  echo "# VLM_ENDPOINT в .env задавать не нужно — localhost-адрес там сломает VLM-режим."
+  selfcheck
+}
+
 case "$MODE" in
-  cpu)
-    command -v docker >/dev/null || { echo "docker не найден" >&2; exit 1; }
-    docker compose --profile vlm-cpu up -d --force-recreate
-    echo "Жду загрузки моделей Ollama (glm-ocr, PaddleOCR-VL) — первый раз это долго..."
-    docker compose logs -f ollama-pull || true
-    print_endpoints
-    selfcheck
-    ;;
+  cpu) run_compose vlm-cpu ;;
   gpu)
-    command -v docker >/dev/null || { echo "docker не найден" >&2; exit 1; }
     command -v nvidia-smi >/dev/null || echo "ВНИМАНИЕ: nvidia-smi не найден — GPU-профиль скорее всего не стартует"
-    docker compose --profile vlm-cpu --profile vlm-gpu up -d --force-recreate
-    docker compose logs -f ollama-pull || true
-    print_endpoints
-    selfcheck
+    run_compose vlm-gpu
     ;;
   native)
-    command -v ollama >/dev/null || { echo "ollama не найден — поставьте https://ollama.com" >&2; exit 1; }
-    ollama pull glm-ocr
-    ollama pull MedAIBase/PaddleOCR-VL:0.9b
-    if command -v llama-server >/dev/null; then
-      echo "Запускаю llama-server (HunyuanOCR) в фоне на :8081..."
-      nohup llama-server -hf ggml-org/HunyuanOCR-GGUF --host 0.0.0.0 --port 8081 -c 16384 \
-        > "$REPO_ROOT/llama-hunyuan.log" 2>&1 &
-      echo "  лог: $REPO_ROOT/llama-hunyuan.log"
-    else
-      echo "llama-server не найден — поставьте llama.cpp и запустите:"
-      echo "  llama-server -hf ggml-org/HunyuanOCR-GGUF --port 8081 -c 16384"
-    fi
-    print_endpoints
+    command -v llama-server >/dev/null || {
+      echo "llama-server не найден — поставьте llama.cpp (сборка b11206 или новее)" >&2; exit 1; }
+    python -c "import huggingface_hub, gguf" 2>/dev/null || {
+      echo "нужны пакеты: pip install huggingface_hub==2.0.0 gguf==0.19.0" >&2; exit 1; }
+    VLM_DIR="$REPO_ROOT/.vlm"
+    mkdir -p "$VLM_DIR/models"
+    python scripts/vlm/fetch_models.py "$VLM_DIR/models"
+    # models.ini ссылается на /models (путь в контейнере) — подставляем локальную папку.
+    sed "s#= /models/#= $VLM_DIR/models/#" scripts/vlm/models.ini > "$VLM_DIR/models.ini"
+    echo "Запускаю llama-server (router) в фоне на :8080..."
+    nohup llama-server --models-preset "$VLM_DIR/models.ini" --models-max "${VLM_MODELS_MAX:-1}" \
+      --host 127.0.0.1 --port 8080 > "$VLM_DIR/llama-server.log" 2>&1 &
+    echo "  лог: $VLM_DIR/llama-server.log"
+    echo
+    echo "# Нативный backend (uvicorn на хосте): добавьте в его окружение"
+    echo "export VLM_ENDPOINT=http://localhost:8080"
     selfcheck
     ;;
 esac

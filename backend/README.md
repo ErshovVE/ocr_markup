@@ -23,10 +23,25 @@ on the same text to accept it without manual review, is set by the
 `frontend/src/ui/generation_view.py::CONSENSUS_SCHEME_KEYS` for the ready-made
 presets: 1 of 1, 1 of 2, 2 of 2, 2 of 3). Default — all 3 engines, any 2
 agreeing (`engines=["paddle","surya","tesseract"]`, `min_agree=2`) — the
-original hardcoded behavior. When `min_agree <= 1`, cross-checking most texts
-is skipped: the single confident engine wins (or `preferred_model`/best by
-score, see `backend/consensus.py::vote`). `preferred_model` remains a
-tie-break only for the recognition vote and must be included in `engines`.
+original hardcoded behavior. With `min_agree >= 2` the only way into
+`good.txt` is ≥ `min_agree` engines returning **character-for-character
+identical** text; otherwise the line goes to `needs_review.txt` no matter how
+confident a single engine is (its text — `preferred_model` if it returned
+something, else the best by score — is kept as a hint). `score_threshold`
+only matters when `min_agree <= 1`: the single confident engine wins (or
+`preferred_model`/best by score, see `backend/consensus.py::vote`).
+`preferred_model` must be included in `engines`.
+
+Recognition is batched per page: the detected lines are cropped once
+(bbox over all polygon vertices, clamped to the image) and every selected
+engine gets the same list of crops in one call per batch of
+`RECOGNITION_BATCH_SIZE` lines (`backend/config.py`); engines run in
+parallel. The timeout budget is `ENGINE_CALL_TIMEOUT_SECONDS` × batch size;
+the line detector has its own `DETECTOR_CALL_TIMEOUT_SECONDS`, and a hung
+detector or engine is dropped for the rest of the job after 3 consecutive
+timeouts. Input files are matched by extension case-insensitively
+(`.JPG`, `.TIF`, ...), non-recursively, in sorted order. Crops are saved as
+**lossless** WebP.
 
 With `detector_engine="surya"` the line detector sometimes merges 2-3 text
 lines into a single box instead of one (the cause hasn't been tracked down).
@@ -175,9 +190,9 @@ returns `(line polygon, text)` itself. The output is the same
 into manual labeling is unchanged.
 
 All models are reached over one **OpenAI-compatible HTTP** endpoint
-(`POST {endpoint}/v1/chat/completions` with an `image_url`). The models
-themselves run as **external services** (llama-server / Ollama / vLLM) — the
-backend adds only one dependency, `httpx`, and pulls no VLM ML weights.
+(`POST {endpoint}/v1/chat/completions` with an `image_url`) served by
+llama.cpp (see below) — the backend adds only one dependency, `httpx`, and
+pulls no VLM ML weights.
 
 ### `/run` fields
 
@@ -200,31 +215,54 @@ counters.
 
 ### Engines
 
-| id | endpoint env | default | `gpu_only` | box strategy | how to bring it up |
-|---|---|---|---|---|---|
-| `paddleocr_vl` | `PADDLEOCR_VL_ENDPOINT` | `http://localhost:11434` | no | native | `ollama pull MedAIBase/PaddleOCR-VL:0.9b` (community tag) |
-| `glm_ocr` | `GLM_OCR_ENDPOINT` | `http://localhost:11434` | no | layout | `ollama pull glm-ocr` |
-| `hunyuan_ocr` | `HUNYUAN_OCR_ENDPOINT` | `http://localhost:8081` | no | native | `llama-server -hf ggml-org/HunyuanOCR-GGUF --port 8081` |
-| `dots_ocr` | `DOTS_OCR_ENDPOINT` | `http://localhost:8082` | yes | native | vLLM ≥ 0.11.0 (`rednote-hilab/dots.ocr`) |
-| `unlimited_ocr` | `UNLIMITED_OCR_ENDPOINT` | `http://localhost:8083` | yes | native | vLLM / SGLang (`baidu/Unlimited-OCR`) |
+All five models are served by **one llama.cpp `llama-server` in router mode**
+(the `llama-vlm` compose service; presets in `scripts/vlm/models.ini`): one
+address (`VLM_ENDPOINT`, default `http://localhost:8080`, in compose
+`http://llama-vlm:8080`), the model is picked by the request's `model` field
+and loaded on demand. llama.cpp runs the same GGUF files on CPU
+(`vlm-cpu` profile) and GPU (`vlm-gpu`). **At most one model is kept in memory**
+(`--models-max 1`, `VLM_MODELS_MAX`): the next one evicts the previous.
 
-- **native** — the model returns boxes itself (dots.ocr JSON, HunyuanOCR
-  spotting `text(x1,y1),(x2,y2)`, PaddleOCR-VL pipeline JSON, Unlimited-OCR
-  `<box>` tokens).
-- **layout** — the model returns markdown only (`glm_ocr`); line boxes come
-  from `backend/vlm_layout.py`, which reuses the same `paddle` line detector
-  as the classic path and merges adjacent regions to cut HTTP calls.
-- If a model returns nothing (client/parse error), its lines are skipped and
-  a message goes into `error_count`/`errors` — the engine just doesn't
-  participate in that page's grouping.
+| id | preset | GGUF | lines from |
+|---|---|---|---|
+| `paddleocr_vl` | `paddleocr-vl` | `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` (official) | the model: `Spotting:` |
+| `hunyuan_ocr` | `hunyuan-ocr` | `ggml-org/HunyuanOCR-GGUF` | the model: spotting |
+| `glm_ocr` | `glm-ocr` | `ggml-org/GLM-OCR-GGUF` | line detector + `Text Recognition:` |
+| `dots_ocr` | `dots-ocr` | `ggml-org/dots.ocr-GGUF` | line detector + `prompt_ocr` |
+| `unlimited_ocr` | `unlimited-ocr` | `sahilchachra/Unlimited-OCR-GGUF` (community) | line detector + `Free OCR.` |
 
-Bring the services up with `scripts/vlm/setup.sh --cpu` (or
-`scripts\vlm\setup.ps1 -Cpu` on Windows), or the compose profiles
-`--profile vlm-cpu` / `--profile vlm-gpu` (see `docs/docker.md`). Each engine
-also shows up in `GET /models/status` as `vlm_<id>` (a `/v1/models` ping; the
-5 engines are pinged concurrently and the result is cached for a few seconds —
-`VLM_STATUS_CACHE_TTL_SECONDS` — so the polled endpoint doesn't block a worker
-on every request). `/models/prepare` is **not** supported for VLM engines.
+- **native** (`paddleocr_vl`, `hunyuan_ocr`) — the model returns text lines with
+  boxes for the whole page. PaddleOCR-VL 1.6 `Spotting:` answers
+  `<|TEXT_START|>text<|TEXT_END|><|LOC_BEGIN|><|LOC_n|>×8<|LOC_END|>` (4 points),
+  HunyuanOCR — `text(x1,y1),(x2,y2)`; both in [0, 1000]. Pages whose both sides
+  are < 1500 px are upscaled ×2 for PaddleOCR-VL, as the official pipeline does.
+- **layout** (`glm_ocr`, `dots_ocr`, `unlimited_ocr`) — boxes come from
+  `backend/vlm_layout.py` (the same `paddle` line detector as the classic path);
+  every line is sent as its own request (a crop from the full-resolution page).
+  dots.ocr has no per-line mode (`prompt_layout_all_en` returns paragraphs and
+  tables), Unlimited-OCR's box mode relies on special tokens the server strips.
+- Prompts are the models' official ones, verbatim (they're trained on fixed
+  instructions) — see `backend/vlm_adapters.py::PROMPTS` for sources.
+- Order: **model by model** — the whole folder with the first model, then the
+  next one; earlier models' lines are kept in memory, the last model writes
+  lines as it goes. That's exactly `len(vlm_engines)` model switches instead of
+  one per page. Document progress (`docs_processed`) moves during the last pass.
+- Models see a copy of the page downscaled to ≤ `VLM_MAX_IMAGE_SIDE`; boxes are
+  mapped back and crops are cut from the **original** resolution.
+- If a model returns nothing, its lines are skipped and a message with the
+  reason (`HTTP 404`, response timeout, service unreachable, or "no lines in
+  the model's answer") goes into `error_count`/`errors`.
+
+Bring it up with `scripts/vlm/setup.sh --cpu` (`scripts\vlm\setup.ps1 -Cpu` on
+Windows) or `docker compose --profile vlm-cpu up -d` (see `docs/docker.md`).
+The one-shot `vlm-models` container downloads the GGUF files (pinned to HF
+commits, `scripts/vlm/fetch_models.py`; `VLM_MODELS` picks a subset) and patches
+PaddleOCR-VL's mmproj (`clip.vision.image_max_pixels = 1605632`, required for
+`Spotting:`). Each engine shows up in `GET /models/status` as `vlm_<id>`: one
+`GET /v1/models` to llama-server (cached for `VLM_STATUS_CACHE_TTL_SECONDS`) —
+`ready` when the preset exists (detail "loads on first request" until it's
+loaded), `error` when the server is unreachable, the preset is missing or the
+model failed to load. `/models/prepare` is **not** supported for VLM engines.
 
 ### `debug.jsonl` for VLM
 
@@ -236,6 +274,5 @@ but different text for the same box.
 
 - PDF pages are always rasterised — the text layer is not used in VLM mode
   (use `mode="consensus"` for text-layer PDFs).
-- `layout` strategy (GLM-OCR) yields one line per detected region, not
-  necessarily one visual text line.
+- `layout` strategy yields one line per line the detector found.
 - Tables/formulas are stored as plain text lines (the dataset is per-line).

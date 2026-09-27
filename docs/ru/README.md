@@ -14,7 +14,7 @@
   <b>🇷🇺 Русский</b>
 </p>
 
-Инструмент из двух Python-сервисов для подготовки обучающих данных для OCR: **Streamlit**-приложение для ручной разметки пар изображение→текст и **FastAPI**-бэкенд, который авторазмечает пачку документов, прогоняя три OCR-движка параллельно и голосуя за результат.
+Инструмент из двух Python-сервисов для подготовки обучающих данных для OCR: **Streamlit**-приложение для ручной разметки пар изображение→текст и **FastAPI**-бэкенд, который авторазмечает пачку документов — либо прогоняя три классических OCR-движка по каждой строке и голосуя за результат, либо (**VLM-режим**) отправляя страницы целиком в OpenAI-совместимые vision-language модели.
 
 > Локальный однопользовательский инструмент — без аутентификации, без мультитенантного деплоя. Эксплуатационный охват описан в [`backend/README.md`](backend-README.md) и [`docs/RUNBOOK.md`](RUNBOOK.md).
 
@@ -28,7 +28,7 @@
 - История бэкапов с восстановлением в один клик
 
 **🤖 Авторазметка (OCR-консенсус)**
-- Прогоняет **PaddleOCR + SuryaOCR + Tesseract** по каждой обнаруженной строке текста и голосует за результат (большинство → тай-брейк по предпочитаемому движку → лучший score)
+- Прогоняет **PaddleOCR + SuryaOCR + Tesseract** по каждой обнаруженной строке текста (батчами по странице, движки параллельно) и голосует за результат: в схемах «2 из N» строка «хорошая», только если движки выдали посимвольно одинаковый текст
 - Выбираемый движок детекции строк, настраиваемый порог уверенности
 - Прямое извлечение текстового слоя PDF — полностью пропускает OCR, если у PDF уже есть текст
 - Живой трекер прогресса во время выполнения задания, кооперативная отмена
@@ -36,6 +36,11 @@
 - Ошибки файлов/строк видны прямо в UI, а не только в логах backend'а
 - Статус задания переживает перезапуск backend'а (снэпшот на диске), хотя трекер в памяти — нет
 - Строки, где два движка разошлись, помечаются **«Спорные»** — можно посмотреть текст и уверенность каждого движка отдельно
+
+**🧠 Авторазметка (VLM-режим)**
+- Альтернативный путь (`mode="vlm"`): OCR vision-language модели — **PaddleOCR-VL 1.6, HunyuanOCR, GLM-OCR, dots.ocr, Unlimited-OCR**. PaddleOCR-VL и HunyuanOCR отдают строки с боксами по всей странице; GLM-OCR, dots.ocr и Unlimited-OCR читают кропы строк от детектора
+- При нескольких выбранных моделях строки сопоставляются между моделями по IoU боксов и голосуются (`vlm_min_agree`); на выходе те же `good.txt`/`needs_review.txt`/`debug.jsonl`, что и в классическом пути
+- Один движок на все модели — **llama.cpp**, на CPU или GPU, в памяти одна модель за раз; опциональный Docker Compose-профиль (`vlm-cpu` / `vlm-gpu`) или скрипты `scripts/vlm/setup.{sh,ps1}`; готовность видна на вкладке «📦 Модели»
 
 **🌐 Локализованный UI**
 - Строки интерфейса локализованы (RU/EN); язык переключается в любой момент кнопками-флажками вверху страницы
@@ -48,6 +53,13 @@ docker compose up --build
 ```
 Frontend: http://localhost:8501 · Backend: http://localhost:8756
 Рабочие данные кладите в `./data` на хосте — он монтируется в `/data` внутри обоих контейнеров; в UI указывайте пути вида `/data/ваша-папка`. Подробности: [`docs/docker.md`](docker.md).
+
+**+ VLM-режим (опционально)** — сервер моделей (llama.cpp, один движок на все пять моделей) обычным `docker compose up` *не* поднимается; включается одним из профилей:
+```bash
+docker compose --profile vlm-cpu up -d --build   # CPU
+docker compose --profile vlm-gpu up -d --build   # GPU (NVIDIA + nvidia-container-toolkit)
+```
+либо `./scripts/vlm/setup.sh --cpu|--gpu|--native` (Linux/macOS/WSL) / `.\scripts\vlm\setup.ps1 -Cpu|-Gpu|-Native` (Windows). Первый запуск скачивает несколько ГБ GGUF-весов (`VLM_MODELS` — подмножество, см. `.env.example`). Подробности: [`docs/docker.md`](docker.md), API: [`backend/README.md`](backend-README.md).
 
 **Нативно (без Docker)**:
 ```bash
@@ -80,7 +92,9 @@ frontend/            Streamlit-приложение разметки
   tests/
 backend/              FastAPI-сервис OCR-консенсуса
   main.py, jobs.py, pipeline.py, detector.py, recognizers.py, consensus.py, ...
+  pipeline_vlm.py, vlm_client.py, vlm_adapters.py, vlm_consensus.py, vlm_layout.py, vlm_geometry.py   (VLM-режим)
   tests/
+scripts/vlm/          models.ini (пресеты llama.cpp), fetch_models.py, setup.sh / setup.ps1
 docs/                 архитектура, Docker, тесты, runbook — см. ниже
   ru/                   русский перевод всего из docs/, backend/README.md и этого README
 ```
@@ -92,8 +106,8 @@ docs/                 архитектура, Docker, тесты, runbook — с
 | Документ | Содержит |
 |---|---|
 | [`docs/architecture.md`](architecture.md) | Карта модулей, форматы данных на диске, известные хрупкие места (фронтенд) |
-| [`backend/README.md`](backend-README.md) | Полный справочник backend API, обработка PDF, проверка готовности моделей |
-| [`docs/docker.md`](docker.md) | Настройка Docker Compose, volume'ы, сборка/запуск по отдельности |
+| [`backend/README.md`](backend-README.md) | Полный справочник backend API (включая VLM-режим), обработка PDF, проверка готовности моделей |
+| [`docs/docker.md`](docker.md) | Настройка Docker Compose, volume'ы, VLM compose-профили, сборка/запуск по отдельности |
 | [`docs/testing.md`](testing.md) | Что покрыто юнит-тестами, а что нет, и почему; конфиг линтера |
 | [`docs/RUNBOOK.md`](RUNBOOK.md) | Процедура деплоя/передеплоя, health-check'и, типичные проблемы, откат |
 

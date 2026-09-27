@@ -32,6 +32,17 @@ docker compose up -d --build --force-recreate
 Frontend: http://localhost:8501, backend: http://localhost:8756. Details on
 mounting `./data` and the model volumes — in `docs/docker.md`.
 
+With the VLM model servers (VLM auto-labeling mode — not started by default):
+```bash
+docker compose --profile vlm-cpu up -d --build --force-recreate   # CPU: llama.cpp
+docker compose --profile vlm-gpu up -d --build --force-recreate   # or GPU: llama.cpp CUDA build
+```
+One engine (llama.cpp) serves all five models, at most one model in memory.
+The same `--profile` flag must be repeated on `docker compose down`/`logs`/`ps`,
+otherwise the profiled services are ignored. The first start downloads several GB
+of weights (`vlm-models` is a one-shot init container that exits when done).
+Details — `docs/docker.md` ("VLM mode — optional companion services").
+
 **`--build --force-recreate` are required for any code change** — plain
 `docker compose up -d` isn't enough: `docker-compose.yml` mounts only
 `./data:/data` as a volume, the sources (`frontend/src`, `app.py`, all of
@@ -62,6 +73,9 @@ curl http://127.0.0.1:8756/models/status
 ```
 Response: `{"paddle": {...}, "surya": {...}, "tesseract": {...}}`, each one —
 `{"status": "not_checked"|"checking"|"ready"|"error", "detail": ...}`.
+The response also has one `vlm_<id>` key per VLM engine (`vlm_paddleocr_vl`,
+`vlm_glm_ocr`, `vlm_hunyuan_ocr`, `vlm_dots_ocr`, `vlm_unlimited_ocr`) — a ping
+of that engine's `/v1/models`, cached for a few seconds.
 The frontend polls this same endpoint in `generation_view.py::_render_model_status`.
 
 Job status for a specific run: `GET /status/{job_id}` →
@@ -87,6 +101,8 @@ lost with the process's memory): `GET /jobs/status_snapshot?output_dir=...`
 | A job is "stuck" in `running` after a backend restart | Job status is held in the process's memory (`backend/jobs.py::_jobs`), lost on restart | `good.txt`/`needs_review.txt`/`debug.jsonl`/`crops/` themselves aren't lost (written to disk line by line) — check how the job actually ended via `GET /jobs/status_snapshot?output_dir=...` (a status snapshot that survives a restart) |
 | A job needs to be stopped manually | — | `POST /jobs/{job_id}/cancel` (or the "⏹ Cancel" button in the UI). Cancellation is cooperative — checked between files/pages/lines, not instant; anything already written isn't lost |
 | One engine (Paddle/Surya/Tesseract) consistently times out on specific lines, `error_count` keeps growing | Expected for a genuinely hung call — `_run_engines_with_timeout` (`backend/pipeline.py`) returns an empty result for that line and moves on; each call is a one-off thread, a hang doesn't take capacity away from future lines/jobs | Check `errors` in `/status`/`/jobs/status_snapshot` for the specific messages. If the whole job looks frozen (`docs_processed` not growing for minutes) — that's no longer an engine timeout, check `docker logs ocr_markup-backend-1` |
+| `vlm_<id> == "error"`, detail "endpoint unreachable" | llama-server isn't running (compose profile not enabled), `vlm-models` is still downloading, or `VLM_ENDPOINT` points to the wrong place | `docker compose --profile vlm-cpu ps` / `logs vlm-models llama-vlm`; under Docker the address must be `http://llama-vlm:8080`, not `localhost` — remove `VLM_ENDPOINT` from `.env` for a Docker run |
+| `vlm_<id> == "error"`, the model "failed to load" or "is not in the presets" | The GGUF wasn't downloaded (excluded via `VLM_MODELS`, or the download was interrupted) or not enough RAM | `docker compose logs llama-vlm`; re-run `docker compose --profile vlm-cpu up vlm-models`; keep `VLM_MODELS_MAX=1` on a small machine |
 | The ←/→ hotkeys don't work | The JS handler matches by literal button text, easily broken by cosmetic changes | See the fragile coupling in `docs/architecture.md`; check whether the button text in `editor_view.py` changed |
 | A rotated image shows a stale preview | `st.cache_data` wasn't cleared correctly | See the fragile coupling in `docs/architecture.md` (the `image_ops.py` coupling) |
 | `POST /run` accepts an arbitrary path and overwrites files there | A deliberate lack of path validation — a local, single-user, unauthenticated spike | Don't run the backend on a shared/multi-user machine as-is (see `backend/README.md`) |

@@ -1,4 +1,6 @@
-IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
+# Сравниваются без учёта регистра (см. backend/pipeline.py::list_input_files) —
+# камеры/сканеры часто пишут .JPG/.TIF.
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 PDF_EXTENSIONS = (".pdf",)
 DEFAULT_SCORE_THRESHOLD = 0.95
 # Движки распознавания, доступные для консенсуса (см. backend/recognizers.py) —
@@ -12,6 +14,14 @@ DEFAULT_PORT = 8756
 # до ~20с на строку, см. backend/README.md) — если движок завис (а не просто
 # медленный), строка получает пустой результат вместо блокировки всего job'а.
 ENGINE_CALL_TIMEOUT_SECONDS = 30
+# Верхняя граница одного вызова детектора строк на страницу (загрузка модели
+# в неё не входит) — зависший detect() иначе вешал весь job.
+DETECTOR_CALL_TIMEOUT_SECONDS = 120
+# Сколько строк страницы уходит в движки распознавания одним батчем
+# (backend/pipeline.py::_process_boxes). Больше — быстрее (меньше вызовов
+# моделей), меньше — чаще прогресс/проверка отмены и короче бюджет таймаута
+# батча (ENGINE_CALL_TIMEOUT_SECONDS × размер батча).
+RECOGNITION_BATCH_SIZE = 16
 # Схема именования кропов — как в предшественнике этого пайплайна
 # (predict.py::save_image): по CROPS_PER_FOLDER файлов на подпапку
 # (0/, 1/, 2/, ...), а не непрозрачный uuid4 на каждый кроп.
@@ -19,59 +29,49 @@ CROPS_PER_FOLDER = 10000
 CROP_FILENAME_DIGITS = len(str(CROPS_PER_FOLDER))
 
 # ── VLM-режим авторазметки (отдельный путь, см. backend/pipeline_vlm.py) ──
-# Полностраничный парсинг: VLM обрабатывает страницу/регион целиком за один
-# forward и сам отдаёт (полигон строки, текст). Все модели подключаются через
-# единый OpenAI-совместимый HTTP (/v1/chat/completions с image_url) — сам
-# backend тяжёлых ML-зависимостей VLM не тянет, модели поднимает пользователь
-# внешними сервисами (llama-server / Ollama / vLLM), см. scripts/vlm/.
+# Все модели обслуживает ОДИН llama.cpp llama-server в router-режиме
+# (docker-compose.yml: llama-vlm / llama-vlm-gpu, пресеты — scripts/vlm/models.ini):
+# один адрес, модель выбирается полем "model" в запросе и загружается по
+# требованию. llama.cpp работает и на CPU, и на GPU на одних и тех же GGUF.
+# Backend шлёт только OpenAI-совместимый HTTP (/v1/chat/completions с
+# image_url), тяжёлых ML-зависимостей VLM не тянет.
+VLM_ENDPOINT_ENV = "VLM_ENDPOINT"
+VLM_DEFAULT_ENDPOINT = "http://localhost:8080"
 VLM_ENGINES = ("paddleocr_vl", "glm_ocr", "hunyuan_ocr", "dots_ocr", "unlimited_ocr")
 
 # Метаданные каждого движка:
-#   endpoint_env      — имя переменной окружения с базовым URL сервиса
-#   default_endpoint  — фолбэк, если переменная не задана
-#   served_model_name — имя модели в теле запроса (model: ...)
+#   served_model_name — имя пресета в scripts/vlm/models.ini (поле "model" запроса)
 #   box_strategy      — откуда брать боксы строк:
-#       "native" — модель сама отдаёт боксы (dots.ocr JSON, HunyuanOCR
-#                  spotting, PaddleOCR-VL pipeline, Unlimited-OCR <box>-токены)
-#       "layout" — модель отдаёт только текст (markdown), боксы регионов
-#                  берём от backend.detector.Detector (см. backend/vlm_layout.py)
-#   gpu_only          — движок реально работает только на GPU (dots.ocr,
-#                       Unlimited-OCR) — во фронтенде помечен, не required
+#       "native" — модель сама отдаёт строки с боксами (PaddleOCR-VL 1.6
+#                  "Spotting:", HunyuanOCR spotting)
+#       "layout" — модель читает текст одной строки (GLM-OCR, dots.ocr,
+#                  Unlimited-OCR): боксы строк даёт backend.detector.Detector
+#                  (backend/vlm_layout.py), каждая строка — отдельный запрос
+#   upscale_below     — (необязательно) картинку, у которой ОБЕ стороны меньше
+#                       этого числа пикселей, перед запросом увеличить ×2 —
+#                       официальная предобработка Spotting у PaddleOCR-VL
+#                       (PaddleX paddleocr_vl/uilts.py::pre_process_for_spotting)
 VLM_ENGINE_META = {
     "paddleocr_vl": {
-        "endpoint_env": "PADDLEOCR_VL_ENDPOINT",
-        "default_endpoint": "http://localhost:11434",
-        "served_model_name": "MedAIBase/PaddleOCR-VL:0.9b",
+        "served_model_name": "paddleocr-vl",
         "box_strategy": "native",
-        "gpu_only": False,
+        "upscale_below": 1500,
     },
     "glm_ocr": {
-        "endpoint_env": "GLM_OCR_ENDPOINT",
-        "default_endpoint": "http://localhost:11434",
         "served_model_name": "glm-ocr",
         "box_strategy": "layout",
-        "gpu_only": False,
     },
     "hunyuan_ocr": {
-        "endpoint_env": "HUNYUAN_OCR_ENDPOINT",
-        "default_endpoint": "http://localhost:8081",
-        "served_model_name": "HunyuanOCR",
+        "served_model_name": "hunyuan-ocr",
         "box_strategy": "native",
-        "gpu_only": False,
     },
     "dots_ocr": {
-        "endpoint_env": "DOTS_OCR_ENDPOINT",
-        "default_endpoint": "http://localhost:8082",
-        "served_model_name": "dots.ocr",
-        "box_strategy": "native",
-        "gpu_only": True,
+        "served_model_name": "dots-ocr",
+        "box_strategy": "layout",
     },
     "unlimited_ocr": {
-        "endpoint_env": "UNLIMITED_OCR_ENDPOINT",
-        "default_endpoint": "http://localhost:8083",
-        "served_model_name": "baidu/Unlimited-OCR",
-        "box_strategy": "native",
-        "gpu_only": True,
+        "served_model_name": "unlimited-ocr",
+        "box_strategy": "layout",
     },
 }
 
@@ -87,12 +87,11 @@ VLM_CONNECT_TIMEOUT_SECONDS = 5
 # многогигабайтным телом. max_tokens в запросе нормальный ответ и так
 # ограничивает, это защита от неответственного сервера.
 VLM_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
-# Пинг /v1/models для health-check (backend/models_status.py) — короткий,
-# т.к. дергается для всех VLM-движков на каждый GET /models/status.
+# Запрос /v1/models для health-check (backend/models_status.py) — короткий:
+# один на все VLM-движки, дергается на GET /models/status.
 VLM_HEALTHCHECK_TIMEOUT_SECONDS = 3
-# Кэш результата пинга VLM-endpoint'ов: GET /models/status дергается фронтендом
-# по таймеру, а пинговать 5 внешних сервисов на каждый запрос — блокировать
-# воркер на секунды. Внутри окна отдаём последний известный статус.
+# Кэш ответа /v1/models llama-server'а: GET /models/status дергается фронтендом
+# по таймеру — внутри окна отдаём последний известный статус.
 VLM_STATUS_CACHE_TTL_SECONDS = 8
 # Потолок токенов ответа модели. Полностраничные native-стратегии (dots.ocr,
 # HunyuanOCR) отдают всю страницу за один ответ — на плотной A4 4096 токенов
