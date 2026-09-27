@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import threading
-from typing import Optional
+from typing import Optional, Tuple
 
 import httpx
 import numpy as np
@@ -31,6 +31,8 @@ from PIL import Image
 
 from backend.config import (
     VLM_CONNECT_TIMEOUT_SECONDS,
+    VLM_DEFAULT_ENDPOINT,
+    VLM_ENDPOINT_ENV,
     VLM_ENGINE_META,
     VLM_MAX_IMAGE_SIDE,
     VLM_MAX_OUTPUT_TOKENS,
@@ -78,16 +80,10 @@ def close() -> None:
             _client_instance = None
 
 
-def _endpoint(engine_id: str) -> str:
-    """Базовый URL сервиса движка: из переменной окружения, иначе дефолт из
-    config. Пусто → RuntimeError (ловится в chat() и уходит в ``""``)."""
-    meta = VLM_ENGINE_META.get(engine_id)
-    if meta is None:
-        raise RuntimeError(f"Неизвестный VLM-движок: {engine_id}")
-    endpoint = os.environ.get(meta["endpoint_env"], "") or meta.get("default_endpoint", "")
-    if not endpoint:
-        raise RuntimeError(f"{meta['endpoint_env']} не задан для движка {engine_id}")
-    return endpoint.rstrip("/")
+def endpoint() -> str:
+    """Базовый URL llama-server (router, общий для всех VLM-движков):
+    VLM_ENDPOINT из окружения, иначе VLM_DEFAULT_ENDPOINT."""
+    return (os.environ.get(VLM_ENDPOINT_ENV, "") or VLM_DEFAULT_ENDPOINT).rstrip("/")
 
 
 def downscale_page(image) -> np.ndarray:
@@ -115,14 +111,8 @@ def _encode_image(image) -> str:
 
     Страница обычно уже приведена к <= VLM_MAX_IMAGE_SIDE в pipeline_vlm
     (downscale_page); здесь тот же зажим остаётся как страховка (например,
-    для крупных region-кропов layout-стратегии)."""
-    pil = Image.fromarray(image) if isinstance(image, np.ndarray) else image
-    pil = pil.convert("RGB")
-    longest = max(pil.size)
-    if longest > VLM_MAX_IMAGE_SIDE:
-        scale = VLM_MAX_IMAGE_SIDE / longest
-        new_size = (max(1, round(pil.size[0] * scale)), max(1, round(pil.size[1] * scale)))
-        pil = pil.resize(new_size)
+    для крупных region-кропов layout-стратегии, которые режутся из оригинала)."""
+    pil = Image.fromarray(downscale_page(image))
     buffer = io.BytesIO()
     # quality=95: картинка идёт на вход OCR-модели, агрессивное lossy-сжатие
     # текста (дефолт webp — 80) режет мелкие буквы; lossless раздул бы запрос.
@@ -158,15 +148,39 @@ def _post_once(url: str, payload: dict) -> str:
     return data["choices"][0]["message"]["content"] or ""
 
 
+def _error_reason(error: Exception) -> str:
+    """Короткая причина ошибки для UI — без URL сервиса (его не показываем
+    наружу, см. M8 в backend/models_status.py); детали — в лог сервера."""
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"HTTP {error.response.status_code}"
+    if isinstance(error, httpx.TimeoutException):
+        return "таймаут ответа модели"
+    if isinstance(error, httpx.ConnectError):
+        return "сервис модели недоступен"
+    if isinstance(error, (KeyError, IndexError, TypeError, ValueError)):
+        return "неожиданный формат ответа"
+    return type(error).__name__
+
+
 def chat(engine_id: str, prompt: str, image) -> str:
     """Один forward VLM по картинке. Возвращает текст ответа или ``""`` при
     любой ошибке (endpoint не задан, сеть, не-200, неожиданная форма ответа).
 
     На connect-ошибке / 5xx — одна повторная попытка; прочие ошибки (в т.ч.
     неожиданная форма ответа) сразу дают ``""``."""
+    return chat_with_reason(engine_id, prompt, image)[0]
+
+
+def chat_with_reason(engine_id: str, prompt: str, image) -> Tuple[str, Optional[str]]:
+    """Как chat(), но вместе с причиной неудачи: (текст, None) или ("", причина).
+
+    Причина уходит в on_error задания (backend/pipeline_vlm.py) — раньше в UI
+    было видно только «пустой ответ», а таймаут/HTTP 404/недоступный сервис
+    различались лишь в логе сервера."""
     try:
-        endpoint = _endpoint(engine_id)
-        url = f"{endpoint}/v1/chat/completions"
+        if engine_id not in VLM_ENGINE_META:
+            raise RuntimeError(f"Неизвестный VLM-движок: {engine_id}")
+        url = f"{endpoint()}/v1/chat/completions"
         payload = {
             "model": VLM_ENGINE_META[engine_id]["served_model_name"],
             "messages": [
@@ -184,7 +198,7 @@ def chat(engine_id: str, prompt: str, image) -> str:
         last_exc: Optional[Exception] = None
         for attempt in range(2):
             try:
-                return _post_once(url, payload)
+                return _post_once(url, payload), None
             except httpx.HTTPStatusError as e:
                 last_exc = e
                 if e.response.status_code not in _RETRYABLE_STATUS:
@@ -196,4 +210,4 @@ def chat(engine_id: str, prompt: str, image) -> str:
         raise last_exc  # type: ignore[misc]
     except Exception as e:  # noqa: BLE001 — как recognize_* в backend/recognizers.py
         logger.warning("Ошибка VLM %s: %s", engine_id, e)
-        return ""
+        return "", _error_reason(e)

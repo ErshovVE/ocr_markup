@@ -10,11 +10,14 @@ def vote(
 ) -> Tuple[str, str, str, bool]:
     """Голосование по результатам движков распознавания: (bucket, text, engine, diverged)
 
-    min_agree — сколько движков должны сойтись в одном тексте, чтобы принять
-    его без разбора уверенности отдельных движков ("N из M" схема выбора
-    движков, см. frontend/src/ui/generation_view.py). При min_agree <= 1
-    сверка большинства пропускается вовсе — побеждает единственный уверенный
-    движок (или предпочитаемый/лучший по score, см. фолбэк ниже), сверять
+    min_agree — сколько движков должны выдать посимвольно одинаковый текст
+    ("N из M" схема, см. frontend/src/ui/generation_view.py). При min_agree >= 2
+    это единственный путь в "good": без такого совпадения строка уходит в
+    needs_review, какой бы уверенной ни была отдельная модель (раньше
+    срабатывал фолбэк "предпочитаемый/лучший по score >= threshold", и "2 из 3"
+    на деле означало "хватит одного уверенного движка"). Текст при этом —
+    подсказка разметчику: предпочитаемый движок, иначе лучший по score.
+    Порог уверенности (threshold) решает только при min_agree <= 1 — сверять
     там не с кем.
 
     diverged=True — минимум 2 движка независимо друг от друга уверены
@@ -39,6 +42,8 @@ def vote(
                     eng for eng, (text, _) in results.items() if text == winner_text
                 )
                 return "good", winner_text, winner_engine, diverged
+        hint_engine = _hint_engine(results, preferred_model)
+        return "needs_review", results[hint_engine][0], hint_engine, diverged
 
     if preferred_model and preferred_model in results:
         text, score = results[preferred_model]
@@ -51,3 +56,11 @@ def vote(
         return "good", best_text, best_engine, diverged
 
     return "needs_review", best_text, best_engine, diverged
+
+
+def _hint_engine(results: Dict[str, Tuple[str, float]], preferred_model: Optional[str]) -> str:
+    """Движок, чей текст показать разметчику в needs_review: предпочитаемый,
+    если он что-то распознал, иначе лучший по score."""
+    if preferred_model and results.get(preferred_model, ("", 0.0))[0]:
+        return preferred_model
+    return max(results, key=lambda eng: results[eng][1])

@@ -31,7 +31,9 @@ def test_vote_uses_preferred_model_when_score_meets_threshold():
         "tesseract": ("c", 0.7),
     }
 
-    bucket, text, engine, diverged = vote(results, threshold=0.6, preferred_model="tesseract")
+    bucket, text, engine, diverged = vote(
+        results, threshold=0.6, preferred_model="tesseract", min_agree=1
+    )
 
     assert bucket == "good"
     assert text == "c"
@@ -45,7 +47,9 @@ def test_vote_ignores_preferred_model_below_threshold_and_falls_back_to_best_sco
         "tesseract": ("c", 0.4),
     }
 
-    bucket, text, engine, diverged = vote(results, threshold=0.9, preferred_model="paddle")
+    bucket, text, engine, diverged = vote(
+        results, threshold=0.9, preferred_model="paddle", min_agree=1
+    )
 
     assert bucket == "good"
     assert text == "b"
@@ -58,7 +62,7 @@ def test_vote_returns_needs_review_when_best_score_below_threshold():
         "surya": ("b", 0.4),
     }
 
-    bucket, text, engine, diverged = vote(results, threshold=0.9)
+    bucket, text, engine, diverged = vote(results, threshold=0.9, min_agree=1)
 
     assert bucket == "needs_review"
     assert engine == "paddle"
@@ -73,7 +77,7 @@ def test_vote_flags_diverged_when_two_confident_engines_disagree():
         "tesseract": ("вариант3", 0.4),
     }
 
-    bucket, text, engine, diverged = vote(results, threshold=0.9)
+    bucket, text, engine, diverged = vote(results, threshold=0.9, min_agree=1)
 
     assert bucket == "good"
     assert diverged is True
@@ -86,7 +90,43 @@ def test_vote_not_diverged_when_only_one_engine_is_confident():
         "tesseract": ("вариант3", 0.1),
     }
 
-    bucket, text, engine, diverged = vote(results, threshold=0.9)
+    bucket, text, engine, diverged = vote(results, threshold=0.9, min_agree=1)
 
     assert bucket == "good"
     assert diverged is False
+
+
+def test_vote_strict_two_of_three_sends_confident_disagreement_to_review():
+    """C.10: при min_agree=2 без посимвольного совпадения 2 движков — только
+    needs_review, даже если отдельные движки уверены."""
+    results = {
+        "paddle": ("Иванов", 0.97),
+        "surya": ("Иваное", 0.96),
+        "tesseract": ("", 0.0),
+    }
+
+    bucket, text, engine, diverged = vote(results, threshold=0.9, min_agree=2)
+
+    assert bucket == "needs_review"
+    assert (text, engine) == ("Иванов", "paddle")
+    assert diverged is True
+
+
+def test_vote_strict_single_confident_engine_is_not_enough():
+    results = {
+        "paddle": ("Иванов", 0.97),
+        "surya": ("Ивонов", 0.60),
+        "tesseract": ("Ивaнов", 0.40),  # латинская "a" — не совпадение
+    }
+
+    bucket, _, _, _ = vote(results, threshold=0.9, min_agree=2)
+
+    assert bucket == "needs_review"
+
+
+def test_vote_strict_hint_prefers_preferred_model_text():
+    results = {"paddle": ("a", 0.97), "surya": ("b", 0.5)}
+
+    bucket, text, engine, _ = vote(results, threshold=0.9, preferred_model="surya", min_agree=2)
+
+    assert (bucket, text, engine) == ("needs_review", "b", "surya")

@@ -6,10 +6,11 @@
 from backend import vlm_adapters
 
 
-def test_parse_hunyuan_spotting_extracts_rectangular_polygon():
-    lines = vlm_adapters.parse_hunyuan_spotting("Привет мир(10,20),(100,45)")
+def test_parse_hunyuan_spotting_denormalizes_0_1000_coords_to_pixels():
+    """Координаты HunyuanOCR — [0, 1000] (официальный denormalize_coordinates)."""
+    lines = vlm_adapters.parse_hunyuan_spotting("Привет мир(100,200),(500,450)", 2000, 1000)
 
-    assert lines == [([[10, 20], [100, 20], [100, 45], [10, 45]], "Привет мир")]
+    assert lines == [([[200, 200], [1000, 200], [1000, 450], [200, 450]], "Привет мир")]
 
 
 def test_parse_hunyuan_spotting_handles_multiple_lines():
@@ -20,72 +21,10 @@ def test_parse_hunyuan_spotting_handles_multiple_lines():
     assert [text for _, text in lines] == ["первая", "вторая"]
 
 
-def test_parse_dotsocr_strips_json_fence():
-    raw = '```json\n[{"bbox": [1, 2, 30, 40], "category": "Text", "text": "a"}]\n```'
-
-    lines = vlm_adapters.parse_dotsocr(raw)
-
-    assert lines == [([[1, 2], [30, 2], [30, 40], [1, 40]], "a")]
-
-
-def test_parse_dotsocr_skips_picture_category():
-    raw = '[{"bbox": [0, 0, 5, 5], "category": "Picture", "text": "logo"}]'
-
-    assert vlm_adapters.parse_dotsocr(raw) == []
-
-
-def test_parse_dotsocr_returns_empty_on_broken_json():
-    assert vlm_adapters.parse_dotsocr("это не json") == []
-
-
-def test_parse_dotsocr_skips_item_with_non_numeric_bbox_without_raising():
-    raw = (
-        '[{"bbox": [1, null, 3, 4], "text": "битый"}, ' '{"bbox": [0, 0, 20, 20], "text": "целый"}]'
-    )
-
-    lines = vlm_adapters.parse_dotsocr(raw)
-
-    assert [text for _, text in lines] == ["целый"]
-
-
-def test_parse_dispatcher_swallows_unexpected_parser_error(monkeypatch):
-    def boom(*_a, **_k):
-        raise RuntimeError("parser blew up")
-
-    monkeypatch.setattr(vlm_adapters, "parse_dotsocr", boom)
-
-    assert vlm_adapters.parse("dots_ocr", "{}") == []
-
-
-def test_parse_unlimited_ocr_reads_ref_box_tokens():
-    raw = "<ref>заголовок</ref><box>(12,34),(210,60)</box> прочее"
-
-    lines = vlm_adapters.parse_unlimited_ocr(raw)
-
-    assert lines == [([[12, 34], [210, 34], [210, 60], [12, 60]], "заголовок")]
-
-
-def test_parse_unlimited_ocr_denormalizes_permille_coords():
-    # координаты 0..1000 приводятся к пикселям по размеру страницы
-    raw = "<ref>x</ref><box>(0,0),(500,500)</box>"
-
-    lines = vlm_adapters.parse_unlimited_ocr(raw, image_w=2000, image_h=4000)
-
-    assert lines[0][0] == [[0, 0], [1000, 0], [1000, 2000], [0, 2000]]
-
-
-def test_parse_paddleocr_vl_reads_parallel_arrays():
-    raw = '{"rec_texts": ["строка"], "rec_polys": [[[1, 1], [9, 1], [9, 5], [1, 5]]]}'
-
-    lines = vlm_adapters.parse_paddleocr_vl(raw)
-
-    assert lines == [([[1, 1], [9, 1], [9, 5], [1, 5]], "строка")]
-
-
-def test_parse_glm_ocr_returns_text_lines_without_boxes():
+def test_parse_region_text_returns_text_lines_without_boxes():
     raw = "```markdown\nпервая строка\nвторая строка\n```"
 
-    assert vlm_adapters.parse_glm_ocr(raw) == ["первая строка", "вторая строка"]
+    assert vlm_adapters.parse_region_text(raw) == ["первая строка", "вторая строка"]
 
 
 def test_postprocess_text_removes_markdown_fence():
@@ -101,24 +40,6 @@ def test_parse_hunyuan_spotting_skips_coordinate_only_lines():
     assert vlm_adapters.parse_hunyuan_spotting("(1,2),(3,4)") == []
 
 
-def test_parse_paddleocr_vl_reads_element_list_with_bbox():
-    raw = '[{"bbox": [5, 6, 50, 20], "rec_text": "элемент"}]'
-
-    assert vlm_adapters.parse_paddleocr_vl(raw) == [
-        ([[5, 6], [50, 6], [50, 20], [5, 20]], "элемент")
-    ]
-
-
-def test_parse_paddleocr_vl_reads_polygon_bbox():
-    raw = '{"elements": [{"poly": [[1, 1], [9, 1], [9, 4], [1, 4]], "text": "p"}]}'
-
-    assert vlm_adapters.parse_paddleocr_vl(raw) == [([[1, 1], [9, 1], [9, 4], [1, 4]], "p")]
-
-
-def test_parse_paddleocr_vl_returns_empty_on_broken_json():
-    assert vlm_adapters.parse_paddleocr_vl("{oops") == []
-
-
 def test_parse_glm_ocr_via_dispatcher_returns_list_of_strings():
     assert vlm_adapters.parse("glm_ocr", "одна\nдве") == ["одна", "две"]
 
@@ -128,8 +49,66 @@ def test_postprocess_text_empty_input_returns_empty():
     assert vlm_adapters.postprocess_text(None) == ""
 
 
-def test_parse_dispatcher_routes_by_engine_id():
-    assert vlm_adapters.parse("dots_ocr", '[{"bbox":[0,0,20,20],"text":"z"}]') == [
-        ([[0, 0], [20, 0], [20, 20], [0, 20]], "z")
+_PVL = (
+    "<|TEXT_START|>Первая строка<|TEXT_END|><|LOC_BEGIN|>"
+    "<|LOC_100|><|LOC_200|><|LOC_500|><|LOC_190|><|LOC_505|><|LOC_450|><|LOC_95|><|LOC_460|>"
+    "<|LOC_END|>"
+    "<|TEXT_START|>Вторая<|TEXT_END|><|LOC_BEGIN|>"
+    "<|LOC_0|><|LOC_500|><|LOC_250|><|LOC_500|><|LOC_250|><|LOC_600|><|LOC_0|><|LOC_600|>"
+    "<|LOC_END|>"
+)
+
+
+def test_parse_paddleocr_vl_spotting_denormalizes_quads_to_axis_boxes():
+    """PaddleOCR-VL 1.6 "Spotting:": 4 точки в [0, 1000] → осевой bbox в пикселях
+    (порт PaddleX post_process_for_spotting)."""
+    lines = vlm_adapters.parse_paddleocr_vl_spotting(_PVL, 2000, 1000)
+
+    assert lines == [
+        ([[190, 190], [1010, 190], [1010, 460], [190, 460]], "Первая строка"),
+        ([[0, 500], [500, 500], [500, 600], [0, 600]], "Вторая"),
     ]
+
+
+def test_parse_paddleocr_vl_spotting_without_special_loc_markers():
+    """LOC_BEGIN/LOC_END — special-токены, сервер может их вырезать: фолбэк
+    режет поток <|LOC_n|> на группы по 8, как PaddleX."""
+    stripped = _PVL.replace("<|LOC_BEGIN|>", "").replace("<|LOC_END|>", "")
+
+    lines = vlm_adapters.parse_paddleocr_vl_spotting(stripped, 2000, 1000)
+
+    assert [text for _, text in lines] == ["Первая строка", "Вторая"]
+    assert lines[1][0] == [[0, 500], [500, 500], [500, 600], [0, 600]]
+
+
+def test_parse_paddleocr_vl_spotting_ignores_incomplete_and_empty():
+    assert vlm_adapters.parse_paddleocr_vl_spotting("<|LOC_1|><|LOC_2|>", 100, 100) == []
+    assert vlm_adapters.parse_paddleocr_vl_spotting("", 100, 100) == []
+
+
+def test_parse_dispatcher_routes_native_and_layout_engines():
+    assert vlm_adapters.parse("hunyuan_ocr", "z(0,0),(100,100)", 20, 20) == [
+        ([[0, 0], [2, 0], [2, 2], [0, 2]], "z")
+    ]
+    for engine in ("glm_ocr", "dots_ocr", "unlimited_ocr"):
+        assert vlm_adapters.parse(engine, "строка") == ["строка"]
     assert vlm_adapters.parse("unknown_engine", "whatever") == []
+
+
+def test_parse_dispatcher_swallows_unexpected_parser_error(monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("parser blew up")
+
+    monkeypatch.setitem(vlm_adapters._NATIVE_PARSERS, "hunyuan_ocr", boom)
+
+    assert vlm_adapters.parse("hunyuan_ocr", "x") == []
+
+
+def test_official_prompts():
+    assert vlm_adapters.PROMPTS == {
+        "paddleocr_vl": "Spotting:",
+        "hunyuan_ocr": "检测并识别图片中的文字，将文本坐标格式化输出。",
+        "glm_ocr": "Text Recognition:",
+        "dots_ocr": "Extract the text content from this image.",
+        "unlimited_ocr": "Free OCR.",
+    }

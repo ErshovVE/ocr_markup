@@ -36,7 +36,7 @@ DEFAULT_CONSENSUS_SCHEME = "2_of_3"
 # совпадают с backend.config.VLM_ENGINES / models_status ключами vlm_<id>.
 RUN_TYPE_KEYS = ("classic", "vlm")
 VLM_MODELS = (
-    ("paddleocr_vl", "PaddleOCR-VL"),
+    ("paddleocr_vl", "PaddleOCR-VL 1.6"),
     ("glm_ocr", "GLM-OCR"),
     ("hunyuan_ocr", "HunyuanOCR"),
     ("dots_ocr", "dots.ocr"),
@@ -44,8 +44,9 @@ VLM_MODELS = (
 )
 VLM_MODEL_LABELS = dict(VLM_MODELS)
 VLM_MODEL_KEYS = tuple(k for k, _ in VLM_MODELS)
-VLM_GPU_ONLY = {"dots_ocr", "unlimited_ocr"}
 DEFAULT_VLM_MODELS = ["paddleocr_vl"]
+# Файл правок разметчика в output_dir (см. _build_manager_from_output).
+REVIEW_FILENAME = "review.txt"
 
 
 def _status_labels():
@@ -142,9 +143,8 @@ def _render_model_status():
 
     st.markdown(t("vlm_section_header"))
     for engine_id, label in VLM_MODELS:
-        display = label + (t("vlm_gpu_suffix") if engine_id in VLM_GPU_ONLY else "")
         row = st.columns([2, 6])
-        row[0].write(display)
+        row[0].write(label)
         # Кнопки «Скачать» нет: VLM поднимает внешний сервис (см. scripts/vlm/),
         # /models/prepare для них отвечает ошибкой.
         _render_engine_status_cell(row[1], f"vlm_{engine_id}", False, "vlm")
@@ -229,14 +229,11 @@ def _render_vlm_run_form(input_dir: str, output_dir: str):
     """Форма запуска VLM-режима: выбор моделей + min_agree + порог IoU."""
     status_cache = st.session_state.get("models_status_cache", {})
 
-    def _model_label(key: str) -> str:
-        return VLM_MODEL_LABELS[key] + (t("vlm_gpu_suffix") if key in VLM_GPU_ONLY else "")
-
     selected = st.multiselect(
         t("vlm_models_label"),
         list(VLM_MODEL_KEYS),
         default=DEFAULT_VLM_MODELS,
-        format_func=_model_label,
+        format_func=VLM_MODEL_LABELS.get,
         help=t("vlm_models_help"),
         key="vlm_models",
     )
@@ -497,21 +494,39 @@ def _render_progress_tracker(status_data: Optional[dict]):
                 st.caption(msg)
 
 
+def _line_image_name(line: str) -> str:
+    """Имя картинки строки rec.txt-формата — ключ records у AnnotationManager."""
+    return os.path.basename(line.split("\t", 1)[0].strip())
+
+
 def _build_manager_from_output(output_dir: str):
-    """Строит новый AnnotationManager из good.txt/needs_review.txt в output_dir"""
-    manager = AnnotationManager(output_dir, os.path.join(output_dir, "review.txt"))
+    """Строит AnnotationManager из результатов авторазметки в output_dir.
+
+    review.txt — это правки разметчика (сюда пишет save_changes), поэтому он
+    главнее сырого вывода backend'а и грузится первым. Из good.txt/
+    needs_review.txt добираются только кропы, которых в review.txt ещё нет
+    (первый переход в разметку или новый запуск в ту же папку). Раньше
+    manager каждый раз собирался из good.txt/needs_review.txt заново:
+    повторный переход показывал исходный вывод моделей, и первое же
+    сохранение затирало правки в review.txt.
+    """
+    review_path = os.path.join(output_dir, REVIEW_FILENAME)
+    manager = AnnotationManager(output_dir, review_path)
+    sources = [(REVIEW_FILENAME, False)] if os.path.exists(review_path) else []
+    sources += [("good.txt", True), ("needs_review.txt", False)]
     try:
-        for fname, mark_as_done in (("good.txt", True), ("needs_review.txt", False)):
+        for fname, mark_as_done in sources:
             path = os.path.join(output_dir, fname)
             if not os.path.exists(path):
                 continue
             with open(path, "r", encoding="utf-8") as f:
-                contents = f.read()
-            imported_names = {
-                os.path.basename(line.split("\t", 1)[0].strip())
-                for line in contents.splitlines()
-                if line.strip()
-            }
+                lines = [line for line in f.read().splitlines() if line.strip()]
+            if fname != REVIEW_FILENAME:
+                lines = [line for line in lines if _line_image_name(line) not in manager.records]
+            if not lines:
+                continue
+            contents = "\n".join(lines) + "\n"
+            imported_names = {_line_image_name(line) for line in lines}
             success, error = manager.load_from_file(contents)
             if not success:
                 st.error(t("import_error", fname=fname, err=error))

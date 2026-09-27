@@ -1,17 +1,23 @@
 <#
 .SYNOPSIS
-  Provision the VLM-mode companion services on Windows.
+  Start llama.cpp for VLM mode on Windows. One engine for all 5 models:
+  llama-server in router mode, at most one model loaded at a time.
 
   NB: kept ASCII-only on purpose. Windows PowerShell 5.1 reads a BOM-less .ps1
   as the system ANSI code page, so Cyrillic here would corrupt the parse.
 
 .EXAMPLE
-  .\scripts\vlm\setup.ps1 -Cpu        # Ollama + llama-server via docker compose
-  .\scripts\vlm\setup.ps1 -Gpu        # + vLLM for dots.ocr / Unlimited-OCR
-  .\scripts\vlm\setup.ps1 -Native     # no docker: ollama pull + llama-server.exe
+  .\scripts\vlm\setup.ps1 -Cpu        # docker compose --profile vlm-cpu (default)
+  .\scripts\vlm\setup.ps1 -Gpu        # docker compose --profile vlm-gpu
+  .\scripts\vlm\setup.ps1 -Native     # no docker: download GGUF to .vlm\ and run llama-server.exe
   .\scripts\vlm\setup.ps1 -Cpu -BackendUrl http://localhost:8756
 
-  Writes .env.vlm with the *_ENDPOINT lines and calls GET {backend}/models/status.
+  $env:VLM_MODELS = "glm-ocr,dots-ocr"  # download only some models (names from scripts\vlm\models.ini)
+
+  Docker modes write nothing: compose already points the backend container at
+  http://llama-vlm:8080, and a localhost VLM_ENDPOINT in .env would break it.
+  -Native writes .env.vlm with VLM_ENDPOINT for a backend run natively on the host.
+  Then calls GET {backend}/models/status.
 #>
 [CmdletBinding()]
 param(
@@ -27,23 +33,6 @@ Set-Location $RepoRoot
 
 if (-not ($Cpu -or $Gpu -or $Native)) { $Cpu = $true }
 
-function Write-EnvFile {
-  param([bool]$IncludeGpu)
-  $lines = @(
-    "GLM_OCR_ENDPOINT=http://localhost:11434",
-    "PADDLEOCR_VL_ENDPOINT=http://localhost:11434",
-    "HUNYUAN_OCR_ENDPOINT=http://localhost:8081"
-  )
-  if ($IncludeGpu) {
-    $lines += "DOTS_OCR_ENDPOINT=http://localhost:8082"
-    $lines += "UNLIMITED_OCR_ENDPOINT=http://localhost:8083"
-  }
-  $path = Join-Path $RepoRoot ".env.vlm"
-  Set-Content -Path $path -Value $lines -Encoding utf8
-  Write-Host "Wrote $path"
-  Get-Content $path | ForEach-Object { Write-Host "  $_" }
-}
-
 function Invoke-SelfCheck {
   Write-Host "`n== GET $BackendUrl/models/status =="
   try {
@@ -54,19 +43,25 @@ function Invoke-SelfCheck {
 }
 
 if ($Native) {
-  if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
-    throw "ollama not found - install from https://ollama.com/download/windows"
+  if (-not (Get-Command llama-server -ErrorAction SilentlyContinue)) {
+    throw "llama-server.exe not found - install llama.cpp (build b11206 or newer)"
   }
-  ollama pull glm-ocr
-  ollama pull MedAIBase/PaddleOCR-VL:0.9b
-  if (Get-Command llama-server -ErrorAction SilentlyContinue) {
-    Write-Host "Starting llama-server (HunyuanOCR) on :8081..."
-    Start-Process -NoNewWindow llama-server -ArgumentList "-hf ggml-org/HunyuanOCR-GGUF --host 0.0.0.0 --port 8081 -c 16384"
-  } else {
-    Write-Host "llama-server.exe not found - install llama.cpp and run manually:"
-    Write-Host "  llama-server -hf ggml-org/HunyuanOCR-GGUF --port 8081 -c 16384"
-  }
-  Write-EnvFile -IncludeGpu:$false
+  & python -c "import huggingface_hub, gguf"
+  if ($LASTEXITCODE -ne 0) { throw "missing packages: pip install huggingface_hub==2.0.0 gguf==0.19.0" }
+  $VlmDir = Join-Path $RepoRoot ".vlm"
+  $ModelsDir = Join-Path $VlmDir "models"
+  New-Item -ItemType Directory -Force $ModelsDir | Out-Null
+  & python scripts\vlm\fetch_models.py $ModelsDir
+  if ($LASTEXITCODE -ne 0) { throw "model download failed" }
+  # models.ini points at /models (container path) - substitute the local folder.
+  $ModelsPrefix = ($ModelsDir -replace '\\', '/') + "/"
+  $Preset = Join-Path $VlmDir "models.ini"
+  (Get-Content scripts\vlm\models.ini) -replace '= /models/', "= $ModelsPrefix" | Set-Content -Path $Preset -Encoding ascii
+  $ModelsMax = if ($env:VLM_MODELS_MAX) { $env:VLM_MODELS_MAX } else { "1" }
+  Write-Host "Starting llama-server (router) on :8080..."
+  Start-Process -NoNewWindow llama-server -ArgumentList "--models-preset `"$Preset`" --models-max $ModelsMax --host 127.0.0.1 --port 8080"
+  Set-Content -Path (Join-Path $RepoRoot ".env.vlm") -Value "VLM_ENDPOINT=http://localhost:8080" -Encoding utf8
+  Write-Host "Wrote .env.vlm (VLM_ENDPOINT=http://localhost:8080) for a native backend"
   Invoke-SelfCheck
   return
 }
@@ -75,17 +70,18 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
   throw "docker not found (Docker Desktop required)"
 }
 
-$composeProfiles = @("--profile", "vlm-cpu")
+$ComposeProfile = "vlm-cpu"
 if ($Gpu) {
   if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
     Write-Host "WARNING: nvidia-smi not found - the GPU profile likely will not start"
   }
-  $composeProfiles += @("--profile", "vlm-gpu")
+  $ComposeProfile = "vlm-gpu"
 }
 
-& docker compose @composeProfiles up -d --force-recreate
-Write-Host "Waiting for Ollama model downloads (slow on first run)..."
-& docker compose logs -f ollama-pull
+& docker compose --profile $ComposeProfile up -d --force-recreate
+Write-Host "Waiting for model downloads (init container vlm-models, slow on first run)..."
+& docker compose logs -f vlm-models
 
-Write-EnvFile -IncludeGpu:$Gpu
+Write-Host "`nBackend in docker compose already targets llama-vlm by name (http://llama-vlm:8080)."
+Write-Host "Do not put VLM_ENDPOINT into .env - a localhost endpoint would break VLM mode."
 Invoke-SelfCheck

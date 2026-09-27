@@ -4,7 +4,6 @@ import os
 import re
 import threading
 import time
-from glob import glob
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -17,19 +16,23 @@ from backend.config import (
     CROPS_PER_FOLDER,
     DEFAULT_ENGINES,
     DEFAULT_MIN_AGREE,
+    DETECTOR_CALL_TIMEOUT_SECONDS,
     ENGINE_CALL_TIMEOUT_SECONDS,
     IMAGE_EXTENSIONS,
     PDF_EXTENSIONS,
+    RECOGNITION_BATCH_SIZE,
 )
 from backend.consensus import vote
 from backend.detector import DEFAULT_DETECTOR_ENGINE, Detector
 from backend.recognizers import (
     DEFAULT_LATIN_MODEL_SIZE,
-    recognize_paddle,
-    recognize_paddle_latin,
-    recognize_surya,
-    recognize_tesseract,
+    EMPTY_RESULT,
+    recognize_paddle_batch,
+    recognize_paddle_latin_batch,
+    recognize_surya_batch,
+    recognize_tesseract_batch,
 )
+from backend.vlm_geometry import clamped_bbox
 
 MIN_CROP_PIX = 10
 
@@ -49,6 +52,9 @@ _ENGINE_LOCKS: Dict[str, threading.Lock] = {
     "paddle": threading.Lock(),
     "surya": threading.Lock(),
     "tesseract": threading.Lock(),
+    # Детектор строк — та же защита (см. _detect_with_timeout): зависший
+    # detect() не вешает job, три зависания подряд снимают его до конца job'а.
+    "detector": threading.Lock(),
 }
 # После скольких таймаутов ПОДРЯД считать движок зависшим и снять его с
 # расписания до конца job'а (иначе каждая строка большой папки платит полный
@@ -69,11 +75,13 @@ def _run_engines_with_timeout(
     timeout: float,
     source_label: str,
     on_error: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Tuple[str, float]]:
+    empty_result=EMPTY_RESULT,
+) -> Dict[str, object]:
     """Запускает несколько recognize_*-вызовов параллельно с общим таймаутом на все вместе.
 
     calls: {имя_движка: (функция, аргументы)}. Если вызов не уложился в общий
-    таймаут, для этого движка возвращается ("", 0.0).
+    таймаут, для этого движка возвращается empty_result (для батча строк —
+    список пустых результатов той же длины, см. _recognize_batch).
 
     Намеренно НЕ использует общий ThreadPoolExecutor — с фиксированным пулом
     один по-настоящему зависший (не исключение — recognize_* уже ловят свои
@@ -92,7 +100,7 @@ def _run_engines_with_timeout(
     начале run()).
     """
     active = {name: spec for name, spec in calls.items() if name not in _engine_disabled}
-    result_box: Dict[str, Tuple[str, float]] = {}
+    result_box: Dict[str, object] = {}
 
     def make_target(name: str, fn: Callable, args: tuple):
         def target() -> None:
@@ -115,7 +123,7 @@ def _run_engines_with_timeout(
         thread.start()
 
     deadline = time.monotonic() + timeout
-    results: Dict[str, Tuple[str, float]] = {name: ("", 0.0) for name in calls}
+    results: Dict[str, object] = {name: empty_result for name in calls}
     for name, thread in threads.items():
         remaining = max(0.0, deadline - time.monotonic())
         thread.join(remaining)
@@ -137,37 +145,107 @@ def _run_engines_with_timeout(
                     logger.error(disabled_msg)
                     if on_error:
                         on_error(disabled_msg)
-            results[name] = ("", 0.0)
+            results[name] = empty_result
         else:
             if name in _ENGINE_LOCKS:
                 _engine_timeout_streak[name] = 0
-            results[name] = result_box.get(name, ("", 0.0))
+            results[name] = result_box.get(name, empty_result)
     return results
 
 
 def _build_engine_calls(
     engines: List[str],
-    img_crop: np.ndarray,
-    image: Image.Image,
-    box,
+    crops: List[np.ndarray],
     lang: str,
     latin_model_size: str,
     tesseract_lang: str,
 ) -> Dict[str, Tuple[Callable, tuple]]:
     """Собирает {имя_движка: (функция, аргументы)} только для выбранных
-    движков (см. RunRequest.engines в backend/main.py) — раньше все 3 движка
-    были прошиты жёстко, из-за чего нельзя было прогнать строку, например,
-    только через Surya."""
+    движков (см. RunRequest.engines в backend/main.py). Каждый вызов —
+    батч: один и тот же список кропов строк на все движки, результат —
+    список (text, score) в том же порядке."""
     calls: Dict[str, Tuple[Callable, tuple]] = {}
     if "paddle" in engines:
-        paddle_fn = recognize_paddle if lang == "ru" else recognize_paddle_latin
-        paddle_args = (img_crop,) if lang == "ru" else (img_crop, latin_model_size)
-        calls["paddle"] = (paddle_fn, paddle_args)
+        if lang == "ru":
+            calls["paddle"] = (recognize_paddle_batch, (crops,))
+        else:
+            calls["paddle"] = (recognize_paddle_latin_batch, (crops, latin_model_size))
     if "surya" in engines:
-        calls["surya"] = (recognize_surya, (image, box))
+        calls["surya"] = (recognize_surya_batch, (crops,))
     if "tesseract" in engines:
-        calls["tesseract"] = (recognize_tesseract, (img_crop, tesseract_lang))
+        calls["tesseract"] = (recognize_tesseract_batch, (crops, tesseract_lang))
     return calls
+
+
+def crop_by_polygon(numpy_image: np.ndarray, poly) -> np.ndarray:
+    """Кроп строки по bbox полигона, зажатому в границы картинки — общий для
+    классического пути, текстового слоя PDF и VLM-пути (см.
+    backend/vlm_geometry.py::clamped_bbox: все вершины, а не box[0]/box[2])."""
+    height, width = numpy_image.shape[:2]
+    x0, y0, x1, y1 = clamped_bbox(poly, width, height)
+    return numpy_image[y0:y1, x0:x1]
+
+
+def _detect_with_timeout(
+    detector: Detector,
+    numpy_image: np.ndarray,
+    source_label: str,
+    on_error: Optional[Callable[[str], None]],
+) -> list:
+    """detect() с таймаутом DETECTOR_CALL_TIMEOUT_SECONDS — раньше зависший
+    детектор вешал весь job без единого сигнала в UI. Не уложился → []
+    (страница пропускается, ошибка уходит в on_error). Сам детектор (загрузка
+    модели, возможно со скачиванием) создаётся вызывающим ДО этого вызова и
+    в таймаут не входит."""
+    result = _run_engines_with_timeout(
+        {"detector": (detector.detect, (numpy_image,))},
+        DETECTOR_CALL_TIMEOUT_SECONDS,
+        source_label,
+        on_error=on_error,
+        empty_result=[],
+    )
+    return result["detector"]
+
+
+def _is_big_enough(crop: np.ndarray) -> bool:
+    return crop.shape[0] > MIN_CROP_PIX and crop.shape[1] > MIN_CROP_PIX
+
+
+def _recognize_batch(
+    crops: List[np.ndarray],
+    engines: List[str],
+    lang: str,
+    latin_model_size: str,
+    tesseract_lang: str,
+    source_label: str,
+    on_error: Optional[Callable[[str], None]],
+) -> List[Dict[str, Tuple[str, float]]]:
+    """Батч кропов → по строке {движок: (text, score)}.
+
+    Движки идут параллельно, каждый — одним вызовом на весь батч. Бюджет
+    времени — ENGINE_CALL_TIMEOUT_SECONDS на строку × размер батча (тот же,
+    что был у построчного вызова); не уложившийся движок даёт пустые
+    результаты на все строки батча."""
+    calls = _build_engine_calls(engines, crops, lang, latin_model_size, tesseract_lang)
+    empty = [EMPTY_RESULT] * len(crops)
+    per_engine = _run_engines_with_timeout(
+        calls,
+        ENGINE_CALL_TIMEOUT_SECONDS * len(crops),
+        f"{source_label} ({len(crops)} строк)",
+        on_error=on_error,
+        empty_result=empty,
+    )
+    rows: List[Dict[str, Tuple[str, float]]] = [{} for _ in crops]
+    for name, results in per_engine.items():
+        if not isinstance(results, list) or len(results) != len(crops):
+            msg = f"Движок {name} вернул некорректный батч: {source_label}"
+            logger.warning(msg)
+            if on_error:
+                on_error(msg)
+            results = empty
+        for row, result in zip(rows, results, strict=True):
+            row[name] = result
+    return rows
 
 
 _CROP_FILENAME_RE = re.compile(r"^image_(\d+)\.webp$")
@@ -211,13 +289,41 @@ def _crop_paths(img_count: int, output_dir: str) -> Tuple[str, str]:
 
 
 def _save_crop(img_crop: np.ndarray, absolute_path: str) -> None:
-    """Сохраняет кроп по уже выделенному пути (см. allocate_crop_path в run())"""
+    """Сохраняет кроп по уже выделенному пути (см. allocate_crop_path в run()).
+
+    WebP без потерь: кроп — обучающий пример, а дефолт Pillow для WEBP —
+    lossy quality=80, который мылит мелкие буквы. quality=101 (так lossless
+    включается в OpenCV) Pillow не принимает — у него это отдельный флаг
+    lossless=True; quality при нём — усилие сжатия, а не качество."""
     os.makedirs(os.path.dirname(absolute_path), exist_ok=True)
-    Image.fromarray(img_crop).save(absolute_path, "WEBP")
+    Image.fromarray(img_crop).save(absolute_path, "WEBP", lossless=True, quality=100)
+
+
+def list_input_files(input_dir: str) -> Tuple[List[str], List[str]]:
+    """Входные документы папки (без рекурсии): (картинки, PDF), каждый список
+    отсортирован по имени.
+
+    Расширение сравнивается без учёта регистра — glob("*.jpg") в Linux-
+    контейнере не видел .JPG/.PNG с камер и сканеров, и задание молча
+    находило 0 документов. os.scandir вместо glob — спецсимволы glob
+    ([, ], *, ?) в имени папки больше не ломают поиск. Сортировка делает
+    сквозную нумерацию кропов воспроизводимой между запусками.
+    """
+    images: List[str] = []
+    pdfs: List[str] = []
+    with os.scandir(input_dir) as entries:
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            ext = os.path.splitext(entry.name)[1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                images.append(entry.path)
+            elif ext in PDF_EXTENSIONS:
+                pdfs.append(entry.path)
+    return sorted(images), sorted(pdfs)
 
 
 def _process_boxes(
-    image: Image.Image,
     numpy_image: np.ndarray,
     boxes,
     threshold: float,
@@ -238,10 +344,19 @@ def _process_boxes(
 ) -> None:
     """Прогоняет обнаруженные детектором боксы через консенсус выбранных движков.
 
+    Батчами по RECOGNITION_BATCH_SIZE строк: каждый движок получает весь
+    батч кропов одним вызовом (движки — параллельно друг с другом), затем
+    по каждой строке — vote() и немедленная запись. Раньше каждый движок
+    вызывался на каждую строку отдельно с batch_size=1 (а Surya ещё и
+    получала всю страницу ради одного бокса). Батч ограничен по размеру,
+    чтобы прогресс/отмена/таймаут оставались гранулярными на плотных
+    страницах. Кроп режется один раз и одинаков для всех движков
+    (crop_by_polygon).
+
     engines/min_agree — выбранная на фронтенде схема ("1 из 1"/"1 из 2"/
     "2 из 2"/"2 из 3", см. frontend/src/ui/generation_view.py): engines —
     какие движки распознавания вообще запускать на строку, min_agree —
-    сколько из них должны сойтись в одном тексте для vote() (backend/consensus.py).
+    сколько из них должны выдать одинаковый текст для vote() (backend/consensus.py).
 
     detector_engine — только для эвристики многострочных боксов ниже
     (детектор Surya иногда объединяет 2-3 строки в один бокс; сама
@@ -249,86 +364,109 @@ def _process_boxes(
     движком она была сделана).
 
     Общая логика для растровых изображений и страниц PDF без текстового слоя
-    (см. run()/_process_pdf()). write_line(bucket, line) вызывается сразу
-    после голосования по каждой строке и пишет её в good.txt/needs_review.txt
-    немедленно (см. run()) — если задание упадёт на середине большой папки,
-    уже распознанные строки не теряются (в отличие от кропов в crops/,
-    которые и так сохраняются сразу, до этого изменения текстовые файлы
-    писались только один раз в самом конце). on_line_done(bucket, diverged) —
-    источник живого прогресса для трекера в backend/jobs.py
-    (детекция+распознавание одной строки Surya может занимать до ~20с,
-    поэтому прогресс по документам целиком слишком редкий). on_error(msg) —
-    сигнал об ошибке/таймауте строки для трекера (в отличие от print(),
-    который виден только в консоли backend). should_cancel() — кооперативная
-    отмена: проверяется перед каждым боксом, чтобы job не докручивал
-    оставшиеся строки после запроса на отмену (см. backend/jobs.py).
-    write_debug(record) — если задан, пишет по одной JSON-записи на строку
-    с текстами/score всех 3 движков (см. run()) — без этого показать
-    разметчику "что видел каждый движок" физически нечем, т.к. vote()
-    оставляет только текст-победитель. allocate_crop_path() — выделяет
-    следующий (относительный, абсолютный) путь кропа по сквозной нумерации
-    (см. run()/_resume_img_count), чтобы разные строки/файлы одного job'а
-    не выбирали один и тот же номер.
+    (см. run()/_process_pdf()). write_line(bucket, line) пишет строку в
+    good.txt/needs_review.txt сразу после голосования (см. run()) — если
+    задание упадёт на середине большой папки, готовые строки не теряются.
+    on_line_done(bucket, diverged) — живой прогресс для трекера
+    (backend/jobs.py); on_error(msg) — ошибка/таймаут, видимые в /status;
+    should_cancel() — кооперативная отмена, проверяется перед каждым батчем
+    и перед записью каждой строки. write_debug(record) — JSON-запись на
+    строку с текстами/score всех движков (vote() оставляет только
+    победителя). allocate_crop_path() — следующий путь кропа по сквозной
+    нумерации (см. run()/_resume_img_count).
     """
+    crops = []
     for box in boxes:
-        if should_cancel and should_cancel():
-            break
         try:
-            x0, y0 = box[0]
-            x2, y2 = box[2]
-            img_crop = numpy_image[int(y0) : int(y2), int(x0) : int(x2)]
-
-            if img_crop.shape[0] <= MIN_CROP_PIX or img_crop.shape[1] <= MIN_CROP_PIX:
-                continue
-
-            calls = _build_engine_calls(
-                engines, img_crop, image, box, lang, latin_model_size, tesseract_lang
-            )
-            results = _run_engines_with_timeout(
-                calls,
-                ENGINE_CALL_TIMEOUT_SECONDS,
-                source_label,
-                on_error=on_error,
-            )
-
-            if detector_engine == "surya":
-                multiline_engines = [name for name, (t, _) in results.items() if "\n" in t]
-                if multiline_engines:
-                    msg = (
-                        f"Похоже, детектор Surya объединил несколько строк в один бокс "
-                        f"(перевод строки в ответе {', '.join(multiline_engines)}): "
-                        f"{source_label} — строка пропущена"
-                    )
-                    logger.warning(msg)
-                    if on_error:
-                        on_error(msg)
-                    continue
-
-            bucket, text, engine, diverged = vote(results, threshold, preferred_model, min_agree)
-
-            crop_relative, crop_absolute = allocate_crop_path()
-            _save_crop(img_crop, crop_absolute)
-            write_line(bucket, f"{crop_relative}\t{text}\n")
-            if on_line_done:
-                on_line_done(bucket, diverged)
-            if write_debug:
-                write_debug(
-                    {
-                        "crop": crop_relative,
-                        "bucket": bucket,
-                        "engine": engine,
-                        "diverged": diverged,
-                        "engines": {
-                            name: {"text": t, "score": s} for name, (t, s) in results.items()
-                        },
-                    }
-                )
+            crop = crop_by_polygon(numpy_image, box)
         except Exception as e:
-            msg = f"Ошибка распознавания строки в {source_label}: {e}"
+            msg = f"Некорректный бокс детектора в {source_label}: {e}"
             logger.warning(msg)
             if on_error:
                 on_error(msg)
             continue
+        if _is_big_enough(crop):
+            crops.append(crop)
+
+    for start in range(0, len(crops), RECOGNITION_BATCH_SIZE):
+        if should_cancel and should_cancel():
+            return
+        batch = crops[start : start + RECOGNITION_BATCH_SIZE]
+        rows = _recognize_batch(
+            batch, engines, lang, latin_model_size, tesseract_lang, source_label, on_error
+        )
+        for img_crop, results in zip(batch, rows, strict=True):
+            if should_cancel and should_cancel():
+                return
+            _write_voted_line(
+                img_crop,
+                results,
+                threshold,
+                preferred_model,
+                min_agree,
+                detector_engine,
+                source_label,
+                write_line,
+                allocate_crop_path,
+                on_line_done,
+                on_error,
+                write_debug,
+            )
+
+
+def _write_voted_line(
+    img_crop: np.ndarray,
+    results: Dict[str, Tuple[str, float]],
+    threshold: float,
+    preferred_model: Optional[str],
+    min_agree: int,
+    detector_engine: str,
+    source_label: str,
+    write_line: Callable[[str, str], None],
+    allocate_crop_path: Callable[[], Tuple[str, str]],
+    on_line_done: Optional[Callable[[str, bool], None]],
+    on_error: Optional[Callable[[str], None]],
+    write_debug: Optional[Callable[[dict], None]],
+) -> None:
+    """Голосование по одной строке батча + запись кропа/строки/debug."""
+    try:
+        if detector_engine == "surya":
+            multiline_engines = [name for name, (t, _) in results.items() if "\n" in t]
+            if multiline_engines:
+                msg = (
+                    f"Похоже, детектор Surya объединил несколько строк в один бокс "
+                    f"(перевод строки в ответе {', '.join(multiline_engines)}): "
+                    f"{source_label} — строка пропущена"
+                )
+                logger.warning(msg)
+                if on_error:
+                    on_error(msg)
+                return
+
+        bucket, text, engine, diverged = vote(results, threshold, preferred_model, min_agree)
+
+        crop_relative, crop_absolute = allocate_crop_path()
+        _save_crop(img_crop, crop_absolute)
+        write_line(bucket, f"{crop_relative}\t{text}\n")
+        if on_line_done:
+            on_line_done(bucket, diverged)
+        if write_debug:
+            write_debug(
+                {
+                    "crop": crop_relative,
+                    "bucket": bucket,
+                    "engine": engine,
+                    "diverged": diverged,
+                    "engines": {
+                        name: {"text": t, "score": sc} for name, (t, sc) in results.items()
+                    },
+                }
+            )
+    except Exception as e:
+        msg = f"Ошибка распознавания строки в {source_label}: {e}"
+        logger.warning(msg)
+        if on_error:
+            on_error(msg)
 
 
 def _process_pdf(
@@ -445,10 +583,8 @@ def _process_pdf_page(
 
         for box, text in boxes_text:
             try:
-                bx0, by0 = box[0]
-                bx2, by2 = box[2]
-                img_crop = numpy_image[int(by0) : int(by2), int(bx0) : int(bx2)]
-                if img_crop.shape[0] <= MIN_CROP_PIX or img_crop.shape[1] <= MIN_CROP_PIX:
+                img_crop = crop_by_polygon(numpy_image, box)
+                if not _is_big_enough(img_crop):
                     continue
                 crop_relative, crop_absolute = allocate_crop_path()
                 _save_crop(img_crop, crop_absolute)
@@ -462,10 +598,8 @@ def _process_pdf_page(
                     on_error(msg)
                 continue
     else:
-        image = Image.fromarray(numpy_image)
-        boxes = get_detector().detect(numpy_image)
+        boxes = _detect_with_timeout(get_detector(), numpy_image, source_label, on_error)
         _process_boxes(
-            image,
             numpy_image,
             boxes,
             threshold,
@@ -555,12 +689,7 @@ def run(
             detector = Detector(engine=detector_engine, tesseract_lang=tesseract_lang)
         return detector
 
-    matched_files = []
-    for ext in IMAGE_EXTENSIONS:
-        matched_files.extend(glob(os.path.join(input_dir, f"*{ext}")))
-    pdf_files = []
-    for ext in PDF_EXTENSIONS:
-        pdf_files.extend(glob(os.path.join(input_dir, f"*{ext}")))
+    matched_files, pdf_files = list_input_files(input_dir)
 
     if on_found:
         on_found(len(matched_files) + len(pdf_files))
@@ -599,9 +728,8 @@ def run(
             if should_cancel and should_cancel():
                 break
             try:
-                image = Image.open(file_path).convert("RGB")
-                numpy_image = np.array(image)
-                boxes = get_detector().detect(numpy_image)
+                numpy_image = np.array(Image.open(file_path).convert("RGB"))
+                boxes = _detect_with_timeout(get_detector(), numpy_image, file_path, on_error)
             except Exception as e:
                 msg = f"Ошибка обработки файла {file_path}: {e}"
                 logger.warning(msg)
@@ -612,7 +740,6 @@ def run(
                 continue
 
             _process_boxes(
-                image,
                 numpy_image,
                 boxes,
                 threshold,

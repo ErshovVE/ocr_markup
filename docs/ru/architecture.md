@@ -32,16 +32,19 @@ Backend (`backend/`) — FastAPI-спайк консенсуса OCR: см. `bac
 
 | Путь | Модуль | Как работает |
 |---|---|---|
-| `mode="consensus"` (по умолчанию) | `backend/pipeline.py` | построчно: детектор → кроп строки → `recognize_*` → `consensus.vote` |
-| `mode="vlm"` | `backend/pipeline_vlm.py` | постранично: один HTTP-вызов vision-language-модели → парсер ответа → IoU-группировка нескольких моделей |
+| `mode="consensus"` (по умолчанию) | `backend/pipeline.py` | постранично: детектор → кропы строк → каждый движок получает батч кропов (`recognize_*_batch`, движки параллельно) → `consensus.vote` по строке |
+| `mode="vlm"` | `backend/pipeline_vlm.py` | модель за моделью по всей папке: страница (или кроп строки от детектора) → HTTP-вызов модели → парсер ответа; проход последней модели сводит строки всех моделей по IoU постранично и пишет |
 
 Модули VLM-режима: `vlm_client.py` (OpenAI-совместимый HTTP), `vlm_adapters.py`
 (промпты + парсеры ответов по моделям), `vlm_geometry.py` (`iou` /
-`merge_adjacent` / `rect_polygon`), `vlm_consensus.py` (IoU-группировка боксов
-+ мажоритарное голосование текстов), `vlm_layout.py` (боксы регионов для GLM
+`clamped_bbox` / `rect_polygon`; `clamped_bbox` же лежит в основе
+`pipeline.crop_by_polygon` — общего вырезания кропа обоих путей),
+`vlm_consensus.py` (IoU-группировка боксов + мажоритарное голосование
+текстов), `vlm_layout.py` (боксы строк для layout-движков GLM-OCR/dots.ocr/Unlimited-OCR
 через `paddle`-детектор — юнит-тестами не покрыт, как `detector.py`).
-Провижининг внешних сервисов моделей — в `scripts/vlm/` и compose-профилях
-`vlm-cpu`/`vlm-gpu`.
+Все пять моделей обслуживает один llama.cpp `llama-server` в router-режиме (в
+памяти не больше одной модели); пресеты, загрузка моделей и запуск — в
+`scripts/vlm/` и compose-профилях `vlm-cpu`/`vlm-gpu`.
 
 ## Формат данных
 

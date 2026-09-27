@@ -1,7 +1,10 @@
+import logging
 from typing import List, Tuple
 
 DETECTOR_ENGINES = ("paddle", "surya", "tesseract")
 DEFAULT_DETECTOR_ENGINE = "paddle"
+
+logger = logging.getLogger(__name__)
 
 
 class _Engines:
@@ -42,7 +45,7 @@ def _detect_paddle(numpy_image) -> List[List[Tuple[int, int]]]:
         result = list(_Engines.paddle().predict(numpy_image, batch_size=1))
         return list(result[0]["dt_polys"]) if result else []
     except Exception as e:
-        print(f"Ошибка детекции PaddleOCR: {e}")
+        logger.warning(f"Ошибка детекции PaddleOCR: {e}")
         return []
 
 
@@ -56,7 +59,7 @@ def _detect_surya(pil_image) -> List[List[Tuple[int, int]]]:
         )
         return [_extract_polygon(box) for box in boxes]
     except Exception as e:
-        print(f"Ошибка детекции Surya: {e}")
+        logger.warning(f"Ошибка детекции Surya: {e}")
         return []
 
 
@@ -85,7 +88,7 @@ def _detect_tesseract(numpy_image, lang: str) -> List[List[Tuple[int, int]]]:
                 box[3] = max(box[3], bottom)
         return [[(x0, y0), (x1, y0), (x1, y1), (x0, y1)] for x0, y0, x1, y1 in lines.values()]
     except Exception as e:
-        print(f"Ошибка детекции Tesseract: {e}")
+        logger.warning(f"Ошибка детекции Tesseract: {e}")
         return []
 
 

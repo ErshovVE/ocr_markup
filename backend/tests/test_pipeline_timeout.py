@@ -93,3 +93,23 @@ def test_run_engines_with_timeout_does_not_degrade_after_a_hang():
 
     assert results == {"e": ("ok", 0.9)}
     assert elapsed < 0.2
+
+
+def test_hung_detector_skips_page_and_reports_error(monkeypatch):
+    """E.16: зависший detect() не вешает job — страница пропускается с ошибкой."""
+    from backend import pipeline
+
+    pipeline.reset_engine_guard()
+    monkeypatch.setattr(pipeline, "DETECTOR_CALL_TIMEOUT_SECONDS", 0.05)
+
+    class HungDetector:
+        def detect(self, image):
+            time.sleep(1.0)
+            return [[[0, 0], [1, 0], [1, 1], [0, 1]]]
+
+    errors = []
+    boxes = pipeline._detect_with_timeout(HungDetector(), None, "scan.png", errors.append)
+
+    assert boxes == []
+    assert any("detector" in e and "scan.png" in e for e in errors)
+    pipeline.reset_engine_guard()

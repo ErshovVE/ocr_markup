@@ -137,3 +137,34 @@ def test_extract_page_text_boxes_empty_for_blank_page(blank_pdf_doc):
     image_height, image_width = image.shape[:2]
 
     assert pdf_extract.extract_page_text_boxes(page, image_width, image_height) == []
+
+
+def _rotated_text_page(text: str, rotate: int):
+    data = _build_pdf([(text, 20, 20)], page_w=400, page_h=200).replace(
+        b"/MediaBox [0 0 400 200]", f"/MediaBox [0 0 400 200] /Rotate {rotate}".encode()
+    )
+    return pdfium.PdfDocument(data)[0]
+
+
+def test_extract_keeps_last_glyph_despite_float_edge_mismatch():
+    """Край 'O' на ~1e-5 выходит за границу text-объекта — раньше "HELL"."""
+    page = _rotated_text_page("HELLO", 0)
+    image = pdf_extract.render_page(page)
+
+    [(_, text)] = pdf_extract.extract_page_text_boxes(page, image.shape[1], image.shape[0])
+
+    assert text == "HELLO"
+
+
+@pytest.mark.parametrize("rotate", [0, 90, 180, 270])
+def test_extract_box_covers_rendered_ink_on_rotated_pages(rotate):
+    page = _rotated_text_page("HELLO", rotate)
+    image = pdf_extract.render_page(page)
+    height, width = image.shape[:2]
+
+    [(box, _)] = pdf_extract.extract_page_text_boxes(page, width, height)
+
+    ys, xs = (image.mean(axis=2) < 128).nonzero()
+    (x0, y0), (x1, y1) = box[0], box[2]
+    assert x0 <= xs.min() + 2 and xs.max() <= x1 + 2
+    assert y0 <= ys.min() + 2 and ys.max() <= y1 + 2

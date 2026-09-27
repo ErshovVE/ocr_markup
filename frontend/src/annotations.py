@@ -38,7 +38,7 @@ class AnnotationManager:
         """Загружает данные из файла"""
         try:
             lines = file_contents.splitlines()
-            image_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
+            image_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
             resolved_base_dir = self.base_dir.resolve()
 
             skipped_missing = 0

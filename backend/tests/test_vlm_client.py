@@ -4,6 +4,7 @@ import base64
 import io
 import logging
 
+import httpx
 import numpy as np
 import pytest
 from PIL import Image
@@ -101,3 +102,19 @@ def test_downscale_page_leaves_small_image_untouched():
     out = vlm_client.downscale_page(small)
 
     assert out.shape == (200, 300, 3)
+
+
+def test_chat_with_reason_reports_http_status_without_url(monkeypatch):
+    request = httpx.Request("POST", "http://secret-host:8082/v1/chat/completions")
+    response = httpx.Response(404, request=request)
+
+    class NotFoundClient:
+        def post(self, url, json):
+            raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+    monkeypatch.setattr(vlm_client, "_client", lambda: NotFoundClient())
+
+    text, reason = vlm_client.chat_with_reason("dots_ocr", "p", np.zeros((5, 5, 3), dtype=np.uint8))
+
+    assert (text, reason) == ("", "HTTP 404")
+    assert "secret-host" not in reason

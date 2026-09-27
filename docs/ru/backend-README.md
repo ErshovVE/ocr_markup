@@ -23,11 +23,25 @@ PaddleOCR/SuryaOCR/TesseractOCR распознаватели). Не включё
 `frontend/src/ui/generation_view.py::CONSENSUS_SCHEME_KEYS` для готовых
 пресетов: 1 из 1, 1 из 2, 2 из 2, 2 из 3). По умолчанию — все 3 движка,
 совпадение любых 2 (`engines=["paddle","surya","tesseract"]`,
-`min_agree=2`) — прежнее захардкоженное поведение. При `min_agree <= 1`
-сверка большинства текстов пропускается: побеждает единственный уверенный
-движок (или `preferred_model`/лучший по score, см. `backend/consensus.py::vote`).
-`preferred_model` остаётся тай-брейком только для голосования распознавания
-и должен входить в `engines`.
+`min_agree=2`) — прежнее захардкоженное поведение. При `min_agree >= 2`
+единственный путь в `good.txt` — ≥ `min_agree` движков выдали **посимвольно
+одинаковый** текст; иначе строка уходит в `needs_review.txt`, какой бы
+уверенной ни была отдельная модель (её текст — `preferred_model`, если он
+что-то распознал, иначе лучший по score — остаётся подсказкой).
+`score_threshold` решает только при `min_agree <= 1`: побеждает единственный
+уверенный движок (или `preferred_model`/лучший по score, см.
+`backend/consensus.py::vote`). `preferred_model` должен входить в `engines`.
+
+Распознавание батчится по странице: найденные строки режутся один раз (bbox
+по всем вершинам полигона, зажатый в границы картинки), и каждый выбранный
+движок получает один и тот же список кропов одним вызовом на батч из
+`RECOGNITION_BATCH_SIZE` строк (`backend/config.py`); движки работают
+параллельно. Бюджет таймаута — `ENGINE_CALL_TIMEOUT_SECONDS` × размер
+батча; у детектора строк свой `DETECTOR_CALL_TIMEOUT_SECONDS`, а зависший
+детектор или движок после 3 таймаутов подряд снимается до конца задания.
+Входные файлы подбираются по расширению без учёта регистра (`.JPG`, `.TIF`,
+...), без рекурсии, в отсортированном порядке. Кропы сохраняются в WebP
+**без потерь**.
 
 При `detector_engine="surya"` детектор строк иногда объединяет 2-3 строки
 текста в один бокс вместо одной (причина не выяснена). Признак — перевод
@@ -167,9 +181,9 @@ vision-language-модель обрабатывает **страницу цел�
 ручную разметку не меняется.
 
 Все модели подключаются через единый **OpenAI-совместимый HTTP**
-(`POST {endpoint}/v1/chat/completions` с `image_url`). Сами модели поднимаются
-**внешними сервисами** (llama-server / Ollama / vLLM) — backend добавляет
-единственную зависимость `httpx` и не тянет ML-веса VLM.
+(`POST {endpoint}/v1/chat/completions` с `image_url`), который обслуживает
+llama.cpp (см. ниже) — backend добавляет единственную зависимость `httpx` и не
+тянет ML-веса VLM.
 
 ### Поля `/run`
 
@@ -192,29 +206,54 @@ vision-language-модель обрабатывает **страницу цел�
 
 ### Движки
 
-| id | env endpoint'а | дефолт | `gpu_only` | стратегия боксов | как поднять |
-|---|---|---|---|---|---|
-| `paddleocr_vl` | `PADDLEOCR_VL_ENDPOINT` | `http://localhost:11434` | нет | native | `ollama pull MedAIBase/PaddleOCR-VL:0.9b` (community-тег) |
-| `glm_ocr` | `GLM_OCR_ENDPOINT` | `http://localhost:11434` | нет | layout | `ollama pull glm-ocr` |
-| `hunyuan_ocr` | `HUNYUAN_OCR_ENDPOINT` | `http://localhost:8081` | нет | native | `llama-server -hf ggml-org/HunyuanOCR-GGUF --port 8081` |
-| `dots_ocr` | `DOTS_OCR_ENDPOINT` | `http://localhost:8082` | да | native | vLLM ≥ 0.11.0 (`rednote-hilab/dots.ocr`) |
-| `unlimited_ocr` | `UNLIMITED_OCR_ENDPOINT` | `http://localhost:8083` | да | native | vLLM / SGLang (`baidu/Unlimited-OCR`) |
+Все пять моделей обслуживает **один llama.cpp `llama-server` в router-режиме**
+(compose-сервис `llama-vlm`; пресеты — `scripts/vlm/models.ini`): один адрес
+(`VLM_ENDPOINT`, по умолчанию `http://localhost:8080`, в compose —
+`http://llama-vlm:8080`), модель выбирается полем `model` запроса и грузится по
+требованию. llama.cpp запускает одни и те же GGUF на CPU (профиль `vlm-cpu`) и
+GPU (`vlm-gpu`). **В памяти не больше одной модели** (`--models-max 1`,
+`VLM_MODELS_MAX`): следующая вытесняет предыдущую.
 
-- **native** — модель сама отдаёт боксы (dots.ocr JSON, HunyuanOCR spotting
-  `text(x1,y1),(x2,y2)`, PaddleOCR-VL pipeline JSON, Unlimited-OCR
-  `<box>`-токены).
-- **layout** — модель отдаёт только markdown (`glm_ocr`); боксы строк даёт
-  `backend/vlm_layout.py`, переиспользуя тот же `paddle`-детектор строк, что и
-  классический путь, со слиянием соседних регионов (меньше HTTP-вызовов).
-- Если движок ничего не отдал (ошибка клиента/парсера) — его строки
-  пропускаются, сообщение уходит в `error_count`/`errors`, движок в
-  группировке этой страницы не участвует.
+| id | пресет | GGUF | откуда строки |
+|---|---|---|---|
+| `paddleocr_vl` | `paddleocr-vl` | `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` (официальный) | модель: `Spotting:` |
+| `hunyuan_ocr` | `hunyuan-ocr` | `ggml-org/HunyuanOCR-GGUF` | модель: spotting |
+| `glm_ocr` | `glm-ocr` | `ggml-org/GLM-OCR-GGUF` | детектор строк + `Text Recognition:` |
+| `dots_ocr` | `dots-ocr` | `ggml-org/dots.ocr-GGUF` | детектор строк + `prompt_ocr` |
+| `unlimited_ocr` | `unlimited-ocr` | `sahilchachra/Unlimited-OCR-GGUF` (сообщество) | детектор строк + `Free OCR.` |
 
-Поднять сервисы: `scripts/vlm/setup.sh --cpu` (или
-`scripts\vlm\setup.ps1 -Cpu` на Windows), либо compose-профили
-`--profile vlm-cpu` / `--profile vlm-gpu` (см. `docs/docker.md`). Каждый
-движок виден в `GET /models/status` как `vlm_<id>` (живой пинг `/v1/models`,
-проверяется каждый запрос — не кэшируется, в отличие от Paddle/Surya).
+- **native** (`paddleocr_vl`, `hunyuan_ocr`) — модель сама отдаёт строки с
+  боксами по всей странице. PaddleOCR-VL 1.6 на `Spotting:` отвечает
+  `<|TEXT_START|>текст<|TEXT_END|><|LOC_BEGIN|><|LOC_n|>×8<|LOC_END|>` (4 точки),
+  HunyuanOCR — `текст(x1,y1),(x2,y2)`; оба в [0, 1000]. Страницы, у которых обе
+  стороны < 1500 px, для PaddleOCR-VL увеличиваются ×2, как в официальном pipeline.
+- **layout** (`glm_ocr`, `dots_ocr`, `unlimited_ocr`) — боксы даёт
+  `backend/vlm_layout.py` (тот же `paddle`-детектор строк, что и классический
+  путь); каждая строка — отдельный запрос (кроп из страницы в полном разрешении).
+  Построчного режима у dots.ocr нет (`prompt_layout_all_en` отдаёт абзацы и
+  таблицы), режим с боксами у Unlimited-OCR опирается на спецтокены, которые
+  сервер вырезает.
+- Промпты — дословно официальные (модели обучены на фиксированных
+  инструкциях), источники — в `backend/vlm_adapters.py::PROMPTS`.
+- Порядок — **модель за моделью**: вся папка первой моделью, потом следующей;
+  строки ранних моделей держатся в памяти, последняя пишет строки сразу. Смен
+  модели ровно `len(vlm_engines)`, а не на каждой странице. Прогресс по
+  документам (`docs_processed`) идёт в последнем проходе.
+- Модели видят копию страницы, уменьшенную до ≤ `VLM_MAX_IMAGE_SIDE`; боксы
+  переводятся обратно, и кропы режутся из **оригинального** разрешения.
+- Если движок ничего не отдал — его строки пропускаются, сообщение с причиной
+  (`HTTP 404`, таймаут ответа, сервис недоступен или «нет строк в ответе
+  модели») уходит в `error_count`/`errors`.
+
+Поднять: `scripts/vlm/setup.sh --cpu` (на Windows `scripts\vlm\setup.ps1 -Cpu`)
+или `docker compose --profile vlm-cpu up -d` (см. `docs/docker.md`). Одноразовый
+контейнер `vlm-models` скачивает GGUF (запинены по коммитам HF,
+`scripts/vlm/fetch_models.py`; `VLM_MODELS` — подмножество) и патчит mmproj
+PaddleOCR-VL (`clip.vision.image_max_pixels = 1605632`, требование `Spotting:`).
+Каждый движок виден в `GET /models/status` как `vlm_<id>`: один запрос
+`GET /v1/models` к llama-server (кэш `VLM_STATUS_CACHE_TTL_SECONDS`) — `ready`,
+если пресет есть (detail «загрузится при первом запросе», пока модель не
+загружена), `error` — сервер недоступен, пресета нет или модель не загрузилась.
 `/models/prepare` для VLM-движков **не поддерживается**.
 
 ### `debug.jsonl` для VLM
@@ -227,6 +266,5 @@ confidence не дают). `diverged` проставляется, когда ≥
 
 - Страницы PDF всегда рендерятся в растр — текстовый слой в VLM-режиме не
   используется (для PDF с текстовым слоем берите `mode="consensus"`).
-- Стратегия `layout` (GLM-OCR) даёт одну строку на найденный регион, не
-  обязательно одну визуальную строку текста.
+- Стратегия `layout` даёт одну строку на строку, найденную детектором.
 - Таблицы/формулы кладутся как обычные строки текста (датасет построчный).

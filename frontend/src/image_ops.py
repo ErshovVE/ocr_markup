@@ -27,6 +27,23 @@ def load_and_resize_image(
         return None
 
 
+def _lossless_save_kwargs(ext: str) -> dict:
+    """Параметры save() при повороте, чтобы не пережимать картинку.
+
+    Дефолты Pillow — lossy: WEBP quality=80, JPEG quality=75 с субдискретизацией
+    цвета, и каждый поворот мылил кроп заново. WebP (формат кропов авторазметки)
+    сохраняем без потерь (lossless=True — аналог quality=101 в OpenCV; сам
+    Pillow quality>100 не принимает). JPEG без потерь в Pillow не пересохранить,
+    поэтому — максимум качества без субдискретизации. PNG/BMP/TIFF и так без
+    потерь. Формат не меняем: путь картинки записан в rec.txt."""
+    ext = ext.lower()
+    if ext == ".webp":
+        return {"lossless": True, "quality": 100}
+    if ext in (".jpg", ".jpeg"):
+        return {"quality": 95, "subsampling": 0}
+    return {}
+
+
 # NOTE: load_and_resize_image.clear() only works because both functions live
 # in this module — see docs/architecture.md
 def rotate_image(image_path: str, direction: str) -> bool:
@@ -44,7 +61,7 @@ def rotate_image(image_path: str, direction: str) -> bool:
             image.load()
             angle = -90 if direction == "right" else 90
             rotated = image.rotate(angle, expand=True)
-        rotated.save(tmp_path)
+        rotated.save(tmp_path, **_lossless_save_kwargs(ext))
         os.replace(tmp_path, image_path)
         load_and_resize_image.clear()
         return True
