@@ -31,6 +31,7 @@ def _fake_pipeline_run(n_files=3, sleep_s=0.0, n_errors=0):
         on_line_done=None,
         on_error=None,
         should_cancel=None,
+        pdf_ocr_fallback=True,
     ):
         if on_found:
             on_found(n_files)
@@ -65,6 +66,7 @@ def _fake_vlm_run(n_files=2):
         on_line_done=None,
         on_error=None,
         should_cancel=None,
+        pdf_ocr_fallback=True,
     ):
         if on_found:
             on_found(n_files)

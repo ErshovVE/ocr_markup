@@ -40,10 +40,10 @@ MAX_ACRONYM_LEN = 5  # заглавные без гласных до этой д
 # обрывки из пятен/печатей: слой разбил строку на буквы, подпись к кропу негодная.
 MIN_SPACED_RUN = 3
 
-# Пороги. Калибровка по сканам советских нормативов (files.stroyinf.ru):
-# чистый типографский слой 0.98–1.0 на документ, мусорный слой машинописи ~0.65.
-GOOD_PAGE_QUALITY = 0.9  # страница с таким качеством слоя — «хорошая»
-MIN_GOOD_PAGES_SHARE = 0.8  # столько оценённых страниц должны быть хорошими
+# Решение «слой или OCR» — постраничное. Калибровка по 16 сканам советских
+# нормативов (files.stroyinf.ru): на страницах с оценкой >= 0.98 ошибочных
+# строк ~3%, на 0.95–0.98 уже ~12%, ниже 0.9 — ~20%.
+PAGE_MIN_QUALITY = 0.98  # страница с таким качеством слоя берётся без OCR
 MIN_PAGE_WORDS = 5  # на странице с меньшим числом слов качество не оценивается
 
 
@@ -109,29 +109,34 @@ def page_qualities(pages_words: List[List[str]]) -> List[Optional[float]]:
     ]
 
 
-def layer_is_trustworthy(qualities: List[Optional[float]]) -> bool:
-    """Достаточная доля оценённых страниц хорошая. Нечего оценивать — доверяем
-    (короткий текст цифрового PDF не с чем сравнивать)."""
-    measured = [q for q in qualities if q is not None]
-    if not measured:
+def page_is_usable(words: List[str]) -> bool:
+    """Можно ли взять текстовый слой страницы вместо OCR. Слов слишком мало,
+    чтобы оценить (короткий текст цифрового PDF), — берём, если текст есть."""
+    if not words:
+        return False
+    if len(words) < MIN_PAGE_WORDS:
         return True
-    good = sum(q >= GOOD_PAGE_QUALITY for q in measured)
-    return good / len(measured) >= MIN_GOOD_PAGES_SHARE
+    return text_quality(words) >= PAGE_MIN_QUALITY
 
 
 def diagnose_layer(pages_words: List[List[str]]) -> Dict:
-    """Слова по страницам -> сводка по слою документа и рекомендация."""
+    """Слова по страницам -> сводка по слою документа. recommend: "text_layer" —
+    слой годится на всех страницах с текстом, "ocr" — ни на одной, "mixed" —
+    часть страниц пойдёт через OCR (backend решает постранично)."""
     qualities = page_qualities(pages_words)
     measured = [q for q in qualities if q is not None]
-    has_text = any(pages_words)
+    with_text = [words for words in pages_words if words]
+    usable = sum(page_is_usable(words) for words in with_text)
+    if with_text and usable == len(with_text):
+        recommend = "text_layer"
+    elif usable:
+        recommend = "mixed"
+    else:
+        recommend = "ocr"
     return {
-        "pages_without_text": sum(not words for words in pages_words),
+        "pages_without_text": len(pages_words) - len(with_text),
+        "usable_pages": usable,
         "median_quality": round(statistics.median(measured), 3) if measured else None,
-        "good_pages_share": (
-            round(sum(q >= GOOD_PAGE_QUALITY for q in measured) / len(measured), 3)
-            if measured
-            else None
-        ),
         "page_quality": qualities,
-        "recommend": "text_layer" if has_text and layer_is_trustworthy(qualities) else "ocr",
+        "recommend": recommend,
     }

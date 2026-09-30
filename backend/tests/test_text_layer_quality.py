@@ -30,22 +30,33 @@ def test_page_qualities_skips_short_pages():
     assert tlq.page_qualities([CLEAN, ["два", "слова"], []]) == [1.0, None, None]
 
 
-def test_layer_is_trustworthy():
-    assert tlq.layer_is_trustworthy([1.0, 0.95, None, 0.9, 0.99, 0.6])  # 4 из 5 хороших
-    assert not tlq.layer_is_trustworthy([1.0, 0.6, 0.65, 0.9])
-    assert tlq.layer_is_trustworthy([None, None])  # нечего оценивать — доверяем
+def test_page_is_usable():
+    assert tlq.page_is_usable(CLEAN)
+    assert not tlq.page_is_usable(GARBAGE)
+    assert not tlq.page_is_usable([])
+    assert tlq.page_is_usable(["два", "слова"])  # оценивать не по чему — берём
+    # 0.95 — ниже порога PAGE_MIN_QUALITY: на таких страницах ~12% строк с ошибками
+    almost = CLEAN * 4 + ["BATCH"]
+    assert 0.9 < tlq.text_quality(almost) < tlq.PAGE_MIN_QUALITY
+    assert not tlq.page_is_usable(almost)
 
 
 def test_diagnose_layer_good_layer():
     result = tlq.diagnose_layer([CLEAN] * 5)
     assert result["recommend"] == "text_layer"
-    assert result["median_quality"] == 1.0 and result["good_pages_share"] == 1.0
+    assert result["median_quality"] == 1.0 and result["usable_pages"] == 5
 
 
 def test_diagnose_layer_garbage_layer_goes_to_ocr():
     result = tlq.diagnose_layer([GARBAGE] * 5)
     assert result["recommend"] == "ocr"
-    assert result["good_pages_share"] == 0.0
+    assert result["usable_pages"] == 0
+
+
+def test_diagnose_layer_mixed():
+    result = tlq.diagnose_layer([CLEAN, GARBAGE, [], CLEAN])
+    assert result["recommend"] == "mixed"
+    assert result["usable_pages"] == 2 and result["pages_without_text"] == 1
 
 
 def test_diagnose_layer_without_text_goes_to_ocr():

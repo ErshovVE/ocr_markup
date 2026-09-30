@@ -13,9 +13,10 @@ id не сохраняется (дубль). --limit — размер набор
 
 Диагностика слоя (поле "layer"): у PDF есть невидимый текстовый слой — чужое
 OCR, на машинописи часто плохое или целиком мусорное. Скрипт его не разбирает,
-а только оценивает тем же правилом, что и backend (pdf_extract.
-document_has_text_layer), стоит ли ему доверять: "recommend": "text_layer"
-или "ocr", плюс качество по страницам.
+а только оценивает тем же постраничным правилом, что и backend
+(pdf_extract.page_text_layer_usable): "recommend": "text_layer" (слой годится
+на всех страницах), "mixed" (часть страниц уйдёт в OCR) или "ocr", плюс
+качество по страницам.
 
 Нужны requests и зависимости backend/pdf_extract.py (pypdfium2, numpy);
 эвристики слоя — общие с backend (backend/text_layer_quality.py).

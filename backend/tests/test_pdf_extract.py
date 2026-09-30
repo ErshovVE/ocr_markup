@@ -1,4 +1,5 @@
 import io
+import random
 from typing import List, Optional, Tuple
 
 import pypdfium2 as pdfium
@@ -76,52 +77,28 @@ def blank_pdf_doc():
     doc.close()
 
 
-def test_page_has_text_layer_true_for_text_page(text_pdf_doc):
-    assert pdf_extract.page_has_text_layer(text_pdf_doc[0]) is True
+def _single_page(line):
+    return pdfium.PdfDocument(_build_pdf([(line, 10, 300)], page_w=600))[0]
 
 
-def test_page_has_text_layer_false_for_blank_page(blank_pdf_doc):
-    assert pdf_extract.page_has_text_layer(blank_pdf_doc[0]) is False
+def test_page_text_layer_usable_for_clean_layer():
+    page = _single_page("The standard applies to washers for machine tools")
+    assert pdf_extract.page_text_layer_usable(page) is True
 
 
-def test_document_has_text_layer_true_when_second_probed_page_has_text():
-    doc = pdfium.PdfDocument(_build_pdf([None, ("Page Two", 72, 300)]))
-    try:
-        assert pdf_extract.document_has_text_layer(doc) is True
-    finally:
-        doc.close()
+def test_page_text_layer_not_usable_for_garbage_layer():
+    # Слой есть, но это мусорное OCR сканера — страница должна уйти в OCR.
+    page = _single_page("Th3 st4nd@rd app1ies t0 w4sh#rs f0r m4ch1ne")
+    assert pdf_extract.page_text_layer_usable(page) is False
 
 
-def test_document_has_text_layer_false_when_text_starts_after_probe_range():
-    # Осознанное упрощение: пробинг смотрит только первые 2 страницы.
-    doc = pdfium.PdfDocument(_build_pdf([None, None, ("Page Three", 72, 300)]))
-    try:
-        assert pdf_extract.document_has_text_layer(doc) is False
-    finally:
-        doc.close()
+def test_page_text_layer_not_usable_for_blank_page(blank_pdf_doc):
+    assert pdf_extract.page_text_layer_usable(blank_pdf_doc[0]) is False
 
 
-def test_document_has_text_layer_false_for_fully_blank_document(blank_pdf_doc):
-    assert pdf_extract.document_has_text_layer(blank_pdf_doc) is False
-
-
-def test_document_has_text_layer_true_for_clean_layer():
-    line = "The standard applies to washers for machine tools"
-    doc = pdfium.PdfDocument(_build_pdf([(line, 10, 300)] * 3, page_w=600))
-    try:
-        assert pdf_extract.document_has_text_layer(doc) is True
-    finally:
-        doc.close()
-
-
-def test_document_has_text_layer_false_for_garbage_layer():
-    # Слой есть, но это мусорное OCR сканера — документ должен уйти в OCR.
-    line = "Th3 st4nd@rd app1ies t0 w4sh#rs f0r m4ch1ne"
-    doc = pdfium.PdfDocument(_build_pdf([(line, 10, 300)] * 3, page_w=600))
-    try:
-        assert pdf_extract.document_has_text_layer(doc) is False
-    finally:
-        doc.close()
+def test_page_text_layer_usable_for_short_text(text_pdf_doc):
+    # 2 слова — оценивать не по чему, но текст есть: берём слой.
+    assert pdf_extract.page_text_layer_usable(text_pdf_doc[0]) is True
 
 
 def test_page_words(text_pdf_doc):
@@ -196,3 +173,48 @@ def test_extract_box_covers_rendered_ink_on_rotated_pages(rotate):
 def test_restore_hyphens_turns_soft_hyphen_markers_into_dash():
     assert pdf_extract._restore_hyphens("на фо\ufffe") == "на фо-"
     assert pdf_extract._restore_hyphens("стан\x02дарт") == "стан-дарт"
+
+
+def _ink_and_box(seed):
+    page = _rotated_text_page("HELLO", 0)
+    image = pdf_extract.render_page(page)
+    height, width = image.shape[:2]
+    [(box, _)] = pdf_extract.extract_page_text_boxes(page, width, height, rng=random.Random(seed))
+    no_pad = pdf_extract.extract_page_text_boxes(page, width, height, rng=_ZeroRng())
+    return box, no_pad[0][0]
+
+
+class _ZeroRng:
+    """rng без поля: randint всегда возвращает нижнюю границу 0."""
+
+    def randint(self, low, high):
+        return 0
+
+
+def test_extract_box_padding_is_random_within_ranges():
+    x_lo, x_hi = pdf_extract.TEXT_BOX_PAD_X_RANGE
+    y_lo, y_hi = pdf_extract.TEXT_BOX_PAD_Y_RANGE
+    pads = set()
+    for seed in range(40):
+        box, bare = _ink_and_box(seed)
+        left, top = bare[0][0] - box[0][0], bare[0][1] - box[0][1]
+        right, bottom = box[2][0] - bare[2][0], box[2][1] - bare[2][1]
+        assert x_lo <= left <= x_hi and x_lo <= right <= x_hi
+        assert y_lo <= top <= y_hi and y_lo <= bottom <= y_hi
+        pads.add((left, top, right, bottom))
+    assert len(pads) > 1  # поле действительно случайное, не фиксированное
+
+
+def test_extract_box_padding_reproducible_with_seed():
+    assert _ink_and_box(7)[0] == _ink_and_box(7)[0]
+
+
+def test_extract_box_padding_is_clamped_to_image():
+    page = pdfium.PdfDocument(_build_pdf([("EDGE", 0, 0)]))[0]
+    image = pdf_extract.render_page(page)
+    height, width = image.shape[:2]
+
+    [(box, _)] = pdf_extract.extract_page_text_boxes(page, width, height)
+
+    (x0, y0), (x1, y1) = box[0], box[2]
+    assert 0 <= x0 and 0 <= y0 and x1 <= width and y1 <= height

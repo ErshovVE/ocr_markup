@@ -48,6 +48,7 @@ def test_run_validates_score_threshold_range(client, input_dir, tmp_path):
         {"engines": ["paddle", "surya"], "min_agree": 1, "preferred_model": "tesseract"},
         {"engines": ["paddle"], "min_agree": 5},
         {"iou_threshold": 0.0},
+        {"extract_pdf_text_layer": False, "pdf_ocr_fallback": False},
     ],
 )
 def test_run_rejects_bad_cross_field_combos(client, input_dir, tmp_path, payload_extra):

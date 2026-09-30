@@ -7,7 +7,8 @@ docs/testing.md).
 """
 
 import ctypes
-from typing import Dict, List, Tuple
+import random
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pypdfium2 as pdfium
@@ -15,7 +16,14 @@ import pypdfium2 as pdfium
 from backend import text_layer_quality
 
 PDF_RENDER_DPI = 200
-PROBE_PAGE_COUNT = 2
+# Поле вокруг рамки строки из текстового слоя, пиксели рендера: случайное для
+# каждой стороны каждой строки (включительные диапазоны). Рамка слоя идёт
+# впритык к буквам и чуть смещена относительно краски — без поля кроп срезал
+# края глифов; случайное вместо фиксированного — чтобы датасет не приучал
+# модель к одинаковым отступам.
+TEXT_BOX_PAD_X_RANGE = (1, 3)  # слева и справа
+TEXT_BOX_PAD_Y_RANGE = (0, 2)  # сверху и снизу
+_RNG = random.Random()
 
 
 def render_page(page: pdfium.PdfPage, dpi: int = PDF_RENDER_DPI) -> np.ndarray:
@@ -36,7 +44,16 @@ def _page_to_pixel(page: pdfium.PdfPage, x: float, y: float, width: int, height:
     return device_x.value, device_y.value
 
 
-def _pixel_rect(page: pdfium.PdfPage, left, bottom, right, top, width: int, height: int):
+def _pixel_rect(
+    page: pdfium.PdfPage,
+    left,
+    bottom,
+    right,
+    top,
+    width: int,
+    height: int,
+    pad: Tuple[int, int, int, int] = (0, 0, 0, 0),
+):
     """Прямоугольник PDF user space → осевой прямоугольник в пикселях
     [[x0,y0],[x1,y0],[x1,y1],[x0,y1]] (углы после поворота нормализуются)."""
     corners = [
@@ -45,7 +62,12 @@ def _pixel_rect(page: pdfium.PdfPage, left, bottom, right, top, width: int, heig
     ]
     xs = [c[0] for c in corners]
     ys = [c[1] for c in corners]
-    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    # pad = (слева, сверху, справа, снизу) в пикселях картинки, в её пределах.
+    pad_left, pad_top, pad_right, pad_bottom = pad
+    x0 = max(0, min(xs) - pad_left)
+    y0 = max(0, min(ys) - pad_top)
+    x1 = min(width, max(xs) + pad_right)
+    y1 = min(height, max(ys) + pad_bottom)
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
 
 
@@ -77,8 +99,21 @@ def _restore_hyphens(text: str) -> str:
     return text
 
 
+def _random_pad(rng: random.Random) -> Tuple[int, int, int, int]:
+    """(слева, сверху, справа, снизу) из TEXT_BOX_PAD_X_RANGE/TEXT_BOX_PAD_Y_RANGE."""
+    return (
+        rng.randint(*TEXT_BOX_PAD_X_RANGE),
+        rng.randint(*TEXT_BOX_PAD_Y_RANGE),
+        rng.randint(*TEXT_BOX_PAD_X_RANGE),
+        rng.randint(*TEXT_BOX_PAD_Y_RANGE),
+    )
+
+
 def extract_page_text_boxes(
-    page: pdfium.PdfPage, image_width: int, image_height: int
+    page: pdfium.PdfPage,
+    image_width: int,
+    image_height: int,
+    rng: Optional[random.Random] = None,
 ) -> List[Tuple[List[List[float]], str]]:
     """Извлекает текстовые боксы страницы PDF из текстового слоя (без OCR).
 
@@ -92,6 +127,9 @@ def extract_page_text_boxes(
     в пиксельных координатах изображения, отрендеренного через render_page()
     ДЛЯ ЭТОЙ ЖЕ страницы этим же image_width/image_height (координаты зависят
     от масштаба рендера; поворот страницы учитывается, см. _page_to_pixel).
+    К рамке добавляется случайное поле (TEXT_BOX_PAD_X_RANGE по горизонтали,
+    TEXT_BOX_PAD_Y_RANGE по вертикали, независимо для каждой стороны); rng —
+    источник случайности (по умолчанию общий модульный, в тестах — с seed).
     """
     textpage = page.get_textpage()
     try:
@@ -115,21 +153,19 @@ def extract_page_text_boxes(
             right = max(b[2] for b in boxes)
             top = max(b[3] for b in boxes)
 
-            rect = _pixel_rect(page, left, bottom, right, top, image_width, image_height)
+            rect = _pixel_rect(
+                page,
+                left,
+                bottom,
+                right,
+                top,
+                image_width,
+                image_height,
+                pad=_random_pad(rng or _RNG),
+            )
             result.append((rect, text))
 
         return result
-    finally:
-        textpage.close()
-
-
-def page_has_text_layer(page: pdfium.PdfPage) -> bool:
-    """True, если у страницы PDF есть непустой извлекаемый текстовый слой"""
-    textpage = page.get_textpage()
-    try:
-        if textpage.count_chars() == 0:
-            return False
-        return bool(textpage.get_text_bounded().strip())
     finally:
         textpage.close()
 
@@ -143,26 +179,13 @@ def page_words(page: pdfium.PdfPage) -> List[str]:
         textpage.close()
 
 
-def document_has_text_layer(
-    pdf_doc: pdfium.PdfDocument, probe_pages: int = PROBE_PAGE_COUNT
-) -> bool:
-    """Решение "использовать текстовый слой" на уровне всего документа.
+def page_text_layer_usable(page: pdfium.PdfPage) -> bool:
+    """Решение "текстовый слой вместо OCR" для одной страницы.
 
-    1. Наличие: проверяются только первые `probe_pages` страниц (по умолчанию
-       2) — если ни одна не содержит текста, документ целиком обрабатывается
-       через обычный OCR-консенсус, даже если текстовый слой появляется на
-       более поздних страницах (осознанное упрощение, см. план/PRD).
-    2. Качество: слой сканов — чужое OCR, на машинописи и плохих сканах часто
-       мусорный. Если хороших страниц по всему документу слишком мало
-       (text_layer_quality.layer_is_trustworthy), документ тоже идёт в OCR,
-       а не попадает в good.txt как есть.
-    """
-    has_text = any(
-        page_has_text_layer(pdf_doc[page_index])
-        for page_index in range(min(probe_pages, len(pdf_doc)))
-    )
-    if not has_text:
-        return False
-    pages_words = [page_words(pdf_doc[page_index]) for page_index in range(len(pdf_doc))]
-    qualities = text_layer_quality.page_qualities(pages_words)
-    return text_layer_quality.layer_is_trustworthy(qualities)
+    Слой сканов — чужое OCR (сканер, FineReader), на машинописи и плохих
+    сканах он с ошибками. Страница берётся из слоя, только если текст есть и
+    его качество не ниже text_layer_quality.PAGE_MIN_QUALITY; иначе она идёт
+    через OCR-консенсус, как растровая. Решение постраничное: в одном
+    документе чистые страницы берутся из слоя, а титул, таблицы и страницы с
+    плохим слоем — распознаются."""
+    return text_layer_quality.page_is_usable(page_words(page))

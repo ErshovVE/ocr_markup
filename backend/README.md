@@ -99,7 +99,7 @@ outside it. Docker Compose sets `OCR_DATA_ROOT=/data` and binds every port to
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float (0..1), "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int}` → `{"job_id": str, "warnings": [str]}`; **422** if a field is out of range or the cross-field checks fail (`engines` empty/unknown, `min_agree` outside `[1, len(engines)]`, `preferred_model` not in `engines`, `iou_threshold` outside `(0, 1]`, …); 400 if `input_dir` doesn't exist, `output_dir` isn't writable, or a path is outside `OCR_DATA_ROOT`; 409 if another job is already running (only one is supported at a time, see backend/jobs.py). `warnings` — engines from `engines` (and the detector) whose model isn't ready yet (`not_checked`/`checking`/`error` in `/models/status`); the job starts anyway. Readiness is checked **before** the job is spawned, so a slow check delays the response rather than detaching from it.
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float (0..1), "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "pdf_ocr_fallback": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int}` → `{"job_id": str, "warnings": [str]}`; **422** if a field is out of range or the cross-field checks fail (`engines` empty/unknown, `min_agree` outside `[1, len(engines)]`, `preferred_model` not in `engines`, `iou_threshold` outside `(0, 1]`, …); 400 if `input_dir` doesn't exist, `output_dir` isn't writable, or a path is outside `OCR_DATA_ROOT`; 409 if another job is already running (only one is supported at a time, see backend/jobs.py). `warnings` — engines from `engines` (and the detector) whose model isn't ready yet (`not_checked`/`checking`/`error` in `/models/status`); the job starts anyway. Readiness is checked **before** the job is spawned, so a slow check delays the response rather than detaching from it.
 - `GET /jobs/active` → `{"job_id": str | null}` — id of the currently running job (or null); needed by the frontend to restore the progress tracker after a page reload
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — the progress tracker updates line by line as the job runs (see backend/jobs.py), not only when a whole file completes (a single Surya line can take up to ~20s to recognize); `diverged_count` — lines where 2+ engines are independently confident (score >= threshold) but disagreed on the text (see backend/consensus.py); `error_count`/`errors` — files/lines that failed with an exception or an engine timeout (see `ENGINE_CALL_TIMEOUT_SECONDS` below) — `error_count` grows unbounded, `errors` holds only the last `MAX_STORED_ERRORS` (default 50) messages
 - `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — unknown `job_id`, 409 — the job is no longer running. Cancellation is cooperative: the thread can't be killed directly, so the job stops at the nearest check between files/pages/lines, without losing what's already written; once stopped, `/status` will show `"status": "cancelled"`
@@ -161,34 +161,36 @@ don't end up in `debug.jsonl` — `vote()` isn't called for them.
 
 ## PDF
 
-The input folder (`input_dir`) can contain `.pdf` files alongside images. For
-each PDF, the first 2 pages are checked for an extractable text layer first
-(`extract_pdf_text_layer=true`, the default):
+The input folder (`input_dir`) can contain `.pdf` files alongside images.
+With `extract_pdf_text_layer=true` (the default) every page of a PDF is
+decided separately (`pdf_extract.page_text_layer_usable`):
 
-- **Has a text layer** — text and coordinates are pulled directly via
-  `pypdfium2` (no OCR), each line goes straight into `good.txt`. Pages
-  without text inside such a document are skipped (not sent to the
-  OCR fallback).
-- **No text layer** (including when text only appears from page 3 onward —
-  only the first 2 pages are checked) — the document is processed page by
-  page as a regular raster image, through the same OCR consensus with the
-  selected `engines`/`min_agree`.
+- **Clean text layer** — text and coordinates are pulled directly via
+  `pypdfium2` (no OCR), each line goes straight into `good.txt`. Line boxes
+  get a random margin so crops don't clip glyph edges: 1–3 px left/right
+  (`TEXT_BOX_PAD_X_RANGE`), 0–2 px top/bottom (`TEXT_BOX_PAD_Y_RANGE`),
+  drawn independently per side and per line.
+- **No text layer, or a poor one** — the page is processed as a regular
+  raster image, through the same OCR consensus with the selected
+  `engines`/`min_agree`. One document can mix both: clean body pages from the
+  layer, the title page, tables and badly recognised pages through OCR.
+  With `pdf_ocr_fallback=false` such pages are skipped instead — a
+  text-layer-only run without slow CPU OCR (images in `input_dir` are still
+  OCR'd; `pdf_ocr_fallback=false` together with `extract_pdf_text_layer=false`
+  is rejected with 422).
 
-**Text-layer quality check**: a scan's text layer is usually the scanner's
-own OCR (a searchable PDF) and can be inaccurate or outright garbage —
-typewritten pages especially. So besides presence, the layer's quality is
-checked across the whole document (`backend/text_layer_quality.py`): each
-page's share of plausible words (no mixed alphabets, no Latin inside Russian
-text except upper-case acronyms like `ISO`, no long vowel-less words, no stray
+**Text-layer quality**: a scan's text layer is usually the scanner's own OCR
+(a searchable PDF) and can be inaccurate or outright garbage — typewritten
+pages especially. `backend/text_layer_quality.py` scores each page as the
+share of plausible words (no mixed alphabets, no Latin inside Russian text
+except upper-case acronyms like `ISO`, no long vowel-less words, no stray
 symbols, no runs of 3+ single letters — letter-spaced text or specks read as
-letters). A page is clean at ≥ 0.9; if fewer than 80% of the pages with enough
-text (≥ 5 words) are clean, the document goes through OCR consensus instead.
-Letter-spaced headings of typeset standards count as garbage too, so even
-clean documents with many such pages go to OCR (slower, not worse). Pages with too little
-text aren't judged; if no page can be judged, the layer is trusted. The
-heuristic has no dictionary, so plausible-looking misspellings still pass —
-for folders known to have bad layers, explicitly turn off
-`extract_pdf_text_layer`.
+letters). A page is taken from the layer at ≥ 0.98 (`PAGE_MIN_QUALITY`):
+on 16 scanned Soviet standards, pages at ≥ 0.98 had ~3% bad lines, at
+0.95–0.98 already ~12%. Pages with fewer than 5 words can't be judged and are
+taken from the layer if they have any text. The heuristic has no dictionary,
+so plausible-looking misspellings still pass — for folders known to have bad
+layers, explicitly turn off `extract_pdf_text_layer`.
 
 ## VLM mode (`mode="vlm"`)
 

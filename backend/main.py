@@ -115,6 +115,9 @@ class RunRequest(BaseModel):
     # Если во входной папке есть PDF с извлекаемым текстовым слоем —
     # вытащить текст+координаты напрямую (без OCR) и сразу пометить как good.
     extract_pdf_text_layer: bool = True
+    # False — страницы PDF без годного текстового слоя пропускаются вместо
+    # OCR-консенсуса (режим «только текстовый слой»: без медленного OCR на CPU).
+    pdf_ocr_fallback: bool = True
     # Движок детекции строк текста — независим от preferred_model.
     detector_engine: Literal["paddle", "surya", "tesseract"] = DEFAULT_DETECTOR_ENGINE
     # Какие движки распознавания прогонять на строку; min_agree — сколько из
@@ -132,6 +135,10 @@ class RunRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_cross_fields(self) -> "RunRequest":
+        if not self.pdf_ocr_fallback and not self.extract_pdf_text_layer:
+            raise ValueError(
+                "pdf_ocr_fallback=false без extract_pdf_text_layer пропустил бы все страницы PDF"
+            )
         if self.mode == "vlm":
             bad = [e for e in self.vlm_engines if e not in VLM_ENGINES]
             if not self.vlm_engines or bad:
@@ -229,6 +236,7 @@ def run(req: RunRequest):
             req.vlm_engines,
             req.vlm_min_agree,
             req.iou_threshold,
+            pdf_ocr_fallback=req.pdf_ocr_fallback,
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e

@@ -487,27 +487,35 @@ def _process_pdf(
     engines: List[str] = DEFAULT_ENGINES,
     min_agree: int = DEFAULT_MIN_AGREE,
     detector_engine: str = "paddle",
+    pdf_ocr_fallback: bool = True,
 ) -> None:
-    """Обрабатывает один PDF-файл постранично: либо прямым извлечением
-    текстового слоя (без OCR), либо обычным OCR-консенсусом растровых страниц.
+    """Обрабатывает один PDF-файл постранично: каждая страница — либо прямым
+    извлечением текстового слоя (без OCR), либо обычным OCR-консенсусом
+    растровой страницы.
 
-    Решение "использовать текстовый слой" принимается один раз для всего
-    документа (pdf_extract.document_has_text_layer) — если да, страницы без
-    текста внутри такого документа просто пропускаются, а не отправляются в
-    OCR (осознанное упрощение, см. план/PRD). write_line/on_line_done см.
-    _process_boxes; при использовании текстового слоя строки считаются сразу
-    good/не diverged (vote() не вызывается — текст берётся из PDF напрямую).
+    Решение "использовать текстовый слой" принимается для каждой страницы
+    отдельно (pdf_extract.page_text_layer_usable): есть ли текст и достаточно
+    ли он чистый. Страница без слоя или с плохим слоем идёт через OCR, а при
+    pdf_ocr_fallback=False пропускается (режим «только текстовый слой» — без
+    медленного OCR на CPU).
+    write_line/on_line_done см. _process_boxes; при использовании текстового
+    слоя строки считаются сразу good/не diverged (vote() не вызывается — текст
+    берётся из PDF напрямую).
     """
     pdf_doc = pdfium.PdfDocument(file_path)
     try:
-        use_text_layer = extract_pdf_text_layer and pdf_extract.document_has_text_layer(pdf_doc)
-
         for page_index in range(len(pdf_doc)):
             if should_cancel and should_cancel():
                 break
             page = pdf_doc[page_index]
             source_label = f"{file_path} (страница {page_index + 1})"
             try:
+                use_text_layer = extract_pdf_text_layer and _page_uses_text_layer(
+                    page, source_label, on_error
+                )
+                if not use_text_layer and not pdf_ocr_fallback:
+                    logger.info(f"{source_label}: пропуск (OCR-fallback выключен)")
+                    continue
                 _process_pdf_page(
                     page,
                     source_label,
@@ -535,6 +543,23 @@ def _process_pdf(
                 page.close()
     finally:
         pdf_doc.close()
+
+
+def _page_uses_text_layer(
+    page, source_label: str, on_error: Optional[Callable[[str], None]]
+) -> bool:
+    """pdf_extract.page_text_layer_usable с логом решения; ошибка чтения слоя
+    — не повод терять страницу: она уходит в OCR."""
+    try:
+        usable = pdf_extract.page_text_layer_usable(page)
+    except Exception as e:
+        msg = f"Ошибка чтения текстового слоя {source_label}, страница пойдёт в OCR: {e}"
+        logger.warning(msg)
+        if on_error:
+            on_error(msg)
+        return False
+    logger.info(f"{source_label}: {'текстовый слой' if usable else 'OCR'}")
+    return usable
 
 
 def _process_pdf_page(
@@ -570,8 +595,6 @@ def _process_pdf_page(
 
     if use_text_layer:
         try:
-            if not pdf_extract.page_has_text_layer(page):
-                return
             image_height, image_width = numpy_image.shape[:2]
             boxes_text = pdf_extract.extract_page_text_boxes(page, image_width, image_height)
         except Exception as e:
@@ -636,10 +659,13 @@ def run(
     on_line_done: Optional[Callable[[str, bool], None]] = None,
     on_error: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    pdf_ocr_fallback: bool = True,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов (изображения + PDF): детекция ->
     распознавание выбранными движками -> голосование; для PDF с текстовым
     слоем — прямое извлечение текста+координат без OCR (см. extract_pdf_text_layer).
+    pdf_ocr_fallback=False — страницы PDF без годного слоя пропускаются, а не
+    распознаются (изображения из input_dir по-прежнему идут через OCR).
 
     engines/min_agree — схема выбора движков распознавания ("1 из 1"/
     "1 из 2"/"2 из 2"/"2 из 3", см. RunRequest в backend/main.py и
@@ -783,6 +809,7 @@ def run(
                     engines=engines,
                     min_agree=min_agree,
                     detector_engine=detector_engine,
+                    pdf_ocr_fallback=pdf_ocr_fallback,
                 )
             except Exception as e:
                 msg = f"Ошибка обработки файла {file_path}: {e}"
