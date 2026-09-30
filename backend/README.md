@@ -67,7 +67,7 @@ A separate virtual environment is recommended:
 ```bash
 python -m venv .venv-backend
 .venv-backend\Scripts\activate  # Windows
-pip install -r backend/requirements.txt
+pip install uv && uv pip install -r backend/requirements.txt --override backend/overrides.txt  # uv: see backend/overrides.txt
 ```
 
 A system Tesseract binary with the Russian language pack is additionally
@@ -178,10 +178,13 @@ each PDF, the first 2 pages are checked for an extractable text layer first
 own OCR (a searchable PDF) and can be inaccurate or outright garbage —
 typewritten pages especially. So besides presence, the layer's quality is
 checked across the whole document (`backend/text_layer_quality.py`): each
-page's share of plausible words (no mixed alphabets, no Latin look-alikes of
-Cyrillic letters inside Russian text, no long vowel-less words, no stray
-symbols). If fewer than 80% of the pages with enough text (≥ 5 words) look
-clean, the document goes through OCR consensus instead. Pages with too little
+page's share of plausible words (no mixed alphabets, no Latin inside Russian
+text except upper-case acronyms like `ISO`, no long vowel-less words, no stray
+symbols, no runs of 3+ single letters — letter-spaced text or specks read as
+letters). A page is clean at ≥ 0.9; if fewer than 80% of the pages with enough
+text (≥ 5 words) are clean, the document goes through OCR consensus instead.
+Letter-spaced headings of typeset standards count as garbage too, so even
+clean documents with many such pages go to OCR (slower, not worse). Pages with too little
 text aren't judged; if no page can be judged, the layer is trusted. The
 heuristic has no dictionary, so plausible-looking misspellings still pass —
 for folders known to have bad layers, explicitly turn off

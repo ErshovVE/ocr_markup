@@ -40,6 +40,15 @@ that resolve outside `/data`.
 so PaddleOCR/SuryaOCR models are downloaded once and survive container
 recreation.
 
+The default `backend/Dockerfile` installs the CPU build of torch (from the
+PyTorch CPU index — the PyPI build drags in several GB of `nvidia-*` packages).
+To run Surya on a GPU, layer the GPU override on top (needs
+nvidia-container-toolkit; PaddleOCR stays on CPU):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
 ## VLM mode — optional companion services
 
 The `mode="vlm"` auto-labeling path (see `backend/README.md`) needs a model

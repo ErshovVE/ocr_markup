@@ -30,22 +30,26 @@ _CLEAN_WORD = re.compile(
     r"|\d+([.,:/-]\d+)*|[IVXL]+)$"  # числа, номера пунктов, римские цифры
 )
 _PUNCT = "«»„“”\"'()[]{}.,;:!?—–-№%°*+=<>/©"
-# pdfium отдаёт мягкий перенос («стан\x02дартизации») как \x02, иногда как U+00AD
-_SOFT_HYPHENS = str.maketrans("", "", "\x02\u00ad")
+# pdfium отдаёт мягкий перенос («стан\x02дартизации») как \x02, U+FFFE или U+00AD
+SOFT_HYPHENS = "\x02\ufffe\u00ad"
+_STRIP_SOFT_HYPHENS = str.maketrans("", "", SOFT_HYPHENS)
 _CYR_LETTER = re.compile(rf"[{CYR}]")
 _LAT_LETTER = re.compile(rf"[{LAT}]")
 MAX_ACRONYM_LEN = 5  # заглавные без гласных до этой длины — аббревиатуры (СССР, ГКНТ)
+# Столько одиночных букв подряд — текст вразрядку («Н е г а т и в н ы е») или
+# обрывки из пятен/печатей: слой разбил строку на буквы, подпись к кропу негодная.
+MIN_SPACED_RUN = 3
 
 # Пороги. Калибровка по сканам советских нормативов (files.stroyinf.ru):
 # чистый типографский слой 0.98–1.0 на документ, мусорный слой машинописи ~0.65.
-GOOD_PAGE_QUALITY = 0.85  # страница с таким качеством слоя — «хорошая»
+GOOD_PAGE_QUALITY = 0.9  # страница с таким качеством слоя — «хорошая»
 MIN_GOOD_PAGES_SHARE = 0.8  # столько оценённых страниц должны быть хорошими
 MIN_PAGE_WORDS = 5  # на странице с меньшим числом слов качество не оценивается
 
 
 def word_ok(word: str, cyrillic_text: bool = True) -> bool:
     """Правдоподобно ли слово из текстового слоя (без словаря, только форма)."""
-    core = word.translate(_SOFT_HYPHENS).strip(_PUNCT)
+    core = word.translate(_STRIP_SOFT_HYPHENS).strip(_PUNCT)
     if not core:
         return True
     if not _CLEAN_WORD.match(core):
@@ -54,7 +58,31 @@ def word_ok(word: str, cyrillic_text: bool = True) -> bool:
     if re.fullmatch(rf"[{CYR}]+", core) and len(core) >= 4 and not acronym:
         if not VOWELS & set(core):
             return False
-    return not (cyrillic_text and len(core) >= 2 and set(core) <= HOMOGLYPHS)
+    if cyrillic_text and _LAT_LETTER.search(core):
+        # Посреди русского текста латиница — почти всегда ошибка OCR: слово из
+        # «кириллических» латинских букв ("BATCH"), строчные обрывки ("oma",
+        # "rfP"), одиночные буквы. Допустимы только заглавные аббревиатуры (ISO).
+        return core.isupper() and len(core) >= 2 and not set(core) <= HOMOGLYPHS
+    return True
+
+
+def _single_letter(word: str) -> bool:
+    core = word.translate(_STRIP_SOFT_HYPHENS).strip(_PUNCT)
+    return len(core) == 1 and core.isalpha()
+
+
+def spaced_letter_mask(words: List[str]) -> List[bool]:
+    """True для слов из серий одиночных букв длиной >= MIN_SPACED_RUN."""
+    mask = [False] * len(words)
+    start = 0
+    while start < len(words):
+        end = start
+        while end < len(words) and _single_letter(words[end]):
+            end += 1
+        if end - start >= MIN_SPACED_RUN:
+            mask[start:end] = [True] * (end - start)
+        start = max(end, start + 1)
+    return mask
 
 
 def is_cyrillic_text(words: List[str]) -> bool:
@@ -68,7 +96,9 @@ def text_quality(words: List[str]) -> float:
     if not total:
         return 0.0
     cyrillic = is_cyrillic_text(words)
-    return sum(len(w) for w in words if word_ok(w, cyrillic)) / total
+    spaced = spaced_letter_mask(words)
+    good = sum(len(w) for w, s in zip(words, spaced, strict=True) if not s and word_ok(w, cyrillic))
+    return good / total
 
 
 def page_qualities(pages_words: List[List[str]]) -> List[Optional[float]]:

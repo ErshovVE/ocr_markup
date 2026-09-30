@@ -39,6 +39,15 @@ docker compose up --build
 `paddleocr-models`/`surya-models`, чтобы модели PaddleOCR/SuryaOCR скачивались
 один раз и переживали пересоздание контейнера.
 
+Основной `backend/Dockerfile` ставит CPU-сборку torch (из CPU-индекса
+PyTorch — сборка с PyPI тянет несколько ГБ пакетов `nvidia-*`). Чтобы Surya
+работала на видеокарте, наложите GPU-override (нужен nvidia-container-toolkit;
+PaddleOCR остаётся на CPU):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
 ## VLM-режим — опциональные companion-сервисы
 
 Режиму авторазметки `mode="vlm"` (см. `backend/README.md`) нужен сервер

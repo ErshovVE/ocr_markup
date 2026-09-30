@@ -21,7 +21,8 @@ Frontend и backend — независимые сервисы с раздель�
 
 ```bash
 pip install -r frontend/requirements.txt   # Streamlit-приложение
-pip install -r backend/requirements.txt    # FastAPI OCR-consensus спайк
+pip install uv                            # backend'у нужен --override из uv, см. backend/overrides.txt
+uv pip install -r backend/requirements.txt --override backend/overrides.txt  # FastAPI OCR-consensus спайк
 pip install -r requirements-dev.txt        # pytest, ruff — общие для обоих
 ```
 

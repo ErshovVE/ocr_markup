@@ -68,7 +68,7 @@ pip install -r frontend/requirements.txt
 cd frontend && streamlit run app.py --server.enableXsrfProtection=false
 
 # Backend (from repo root — uses absolute backend.* imports)
-pip install -r backend/requirements.txt
+pip install uv && uv pip install -r backend/requirements.txt --override backend/overrides.txt  # uv: see backend/overrides.txt
 uvicorn backend.main:app --reload
 ```
 The backend additionally needs a system Tesseract install with the `rus`/`eng` language packs (`tesseract --list-langs`). PaddleOCR/SuryaOCR models download automatically on first use.

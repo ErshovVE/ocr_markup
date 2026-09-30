@@ -1,3 +1,6 @@
 # Shell-скрипты исполняются в Linux/WSL/контейнерах: CRLF из checkout на Windows
 # (core.autocrlf=true) ломает bash ("$'\r': command not found").
 *.sh text eol=lf
+# Dockerfile тоже читается в Linux: RUN-строки с "\" на конце и CRLF — источник
+# трудноуловимых сбоев сборки.
+Dockerfile* text eol=lf

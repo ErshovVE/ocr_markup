@@ -1,0 +1,14 @@
+# Переопределения зависимостей для `uv pip install --override` (см. backend/Dockerfile).
+# pip так не умеет: без них `pip install -r backend/requirements.txt` падает
+# с ResolutionImpossible.
+#
+# surya-ocr 0.16 перестраховочно пинит pillow<11 и pypdfium2==4.30.0. Новые
+# версии surya не помогают: вплоть до 0.20 пины те же, а с 0.21 это Surya2 —
+# другой движок (инференс через отдельный vLLM/llama.cpp-сервер, OCR блоками).
+# Фактически surya берёт из Pillow только Image.Image/Image.Resampling, а из
+# pypdfium2 — только PdfDocument для открытия PDF (backend этот путь не
+# использует: в surya уходят готовые PIL-картинки), так что свежие версии
+# совместимы. Держим их ради CVE-фиксов (у Pillow 10.x по OSV десятки
+# уязвимостей 2026 г.).
+pillow>=11.0,<13
+pypdfium2>=5.11,<6

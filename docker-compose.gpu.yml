@@ -1,0 +1,14 @@
+# GPU-вариант backend (Surya на видеокарте). Накладывается поверх основного файла:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+# Нужен nvidia-container-toolkit. VLM на GPU — отдельно, профиль vlm-gpu.
+services:
+  backend:
+    build:
+      dockerfile: backend/Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

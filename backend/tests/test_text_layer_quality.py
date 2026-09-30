@@ -52,3 +52,28 @@ def test_diagnose_layer_without_text_goes_to_ocr():
     result = tlq.diagnose_layer([[], []])
     assert result["recommend"] == "ocr"
     assert result["pages_without_text"] == 2 and result["median_quality"] is None
+
+
+def test_latin_in_cyrillic_text_is_garbage_except_acronyms():
+    # обрывки из пятен/печатей на титуле РТМ 7-120-82
+    for word in ["oma", "rfP", "ftHi", "H", "9mmi"]:
+        assert not tlq.word_ok(word, cyrillic_text=True), word
+    assert tlq.word_ok("ISO", cyrillic_text=True)
+    assert tlq.word_ok("GOST", cyrillic_text=True)
+
+
+def test_spaced_letters_are_garbage():
+    spaced = "Н е г а т и в н ы е м а с к и".split()
+    assert tlq.text_quality(spaced) == 0.0
+    # обычные однобуквенные предлоги поодиночке — не разрядка
+    assert tlq.text_quality("в соответствии с ГОСТ и в срок".split()) == 1.0
+
+
+def test_spaced_letter_mask_marks_only_long_runs():
+    words = ["слово", "а", "б", "слово", "в", "г", "д", "е"]
+    assert tlq.spaced_letter_mask(words) == [False] * 4 + [True] * 4
+
+
+def test_soft_hyphen_markers_are_ignored():
+    assert tlq.word_ok("фо\ufffe")
+    assert tlq.word_ok("стан\u00adдарт")

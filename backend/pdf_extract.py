@@ -7,7 +7,7 @@ docs/testing.md).
 """
 
 import ctypes
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pypdfium2 as pdfium
@@ -16,17 +16,6 @@ from backend import text_layer_quality
 
 PDF_RENDER_DPI = 200
 PROBE_PAGE_COUNT = 2
-
-
-def _object_pos(obj) -> Tuple[float, float, float, float]:
-    """(left, bottom, right, top) текстового объекта в координатах страницы PDF.
-
-    pypdfium2 4.x — ``obj.get_pos()``; 5.x переименовал его в ``obj.get_bounds()``
-    (та же семантика возврата). Поддерживаем обе, чтобы пин backend/requirements
-    и локальное окружение могли расходиться по минорной версии без падения.
-    """
-    getter = getattr(obj, "get_pos", None) or obj.get_bounds
-    return getter()
 
 
 def render_page(page: pdfium.PdfPage, dpi: int = PDF_RENDER_DPI) -> np.ndarray:
@@ -60,15 +49,32 @@ def _pixel_rect(page: pdfium.PdfPage, left, bottom, right, top, width: int, heig
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
 
 
-def _center_inside(box, left, bottom, right, top) -> bool:
-    """Центр charbox внутри границ объекта. Строгое «charbox целиком внутри»
-    отбрасывало символы из-за float-погрешности pdfium (край глифа 97.61600494
-    против границы объекта 97.61599731): "HELLO" извлекалось как "HELL", а
-    если такой символ был в середине строки — текст терял букву, которую
-    кроп при этом показывает (неверная подпись в good.txt)."""
-    cx = (box[0] + box[2]) / 2
-    cy = (box[1] + box[3]) / 2
-    return left <= cx <= right and bottom <= cy <= top
+def _chars_by_text_object(textpage: pdfium.PdfTextPage) -> List[List[int]]:
+    """Индексы символов страницы, сгруппированные по PDF text-объекту, которому
+    их приписал сам pdfium (FPDFText_GetTextObject), в порядке первого символа.
+
+    Раньше символ относили к объекту геометрически — центр его рамки внутри
+    границ объекта. На сканах с невидимым слоем FineReader шрифты не встроены
+    (TimesNewRoman, Tahoma), и без них в системе (slim Docker-образ) pdfium
+    считает границы объекта по контурам глифов шрифта-замены — для кириллицы
+    вырожденным: граница обрывалась на начале последней буквы, и строки
+    теряли её в тексте и в кропе ("от 20 декабр")."""
+    groups: Dict[int, List[int]] = {}
+    for index in range(textpage.count_chars()):
+        handle = pdfium.raw.FPDFText_GetTextObject(textpage.raw, index)
+        key = ctypes.cast(handle, ctypes.c_void_p).value
+        if key is not None:
+            groups.setdefault(key, []).append(index)
+    return list(groups.values())
+
+
+def _restore_hyphens(text: str) -> str:
+    """Мягкий перенос pdfium (text_layer_quality.SOFT_HYPHENS) -> видимый дефис:
+    на скане в конце строки напечатан обычный знак переноса, подпись к кропу
+    должна с ним совпадать."""
+    for char in text_layer_quality.SOFT_HYPHENS:
+        text = text.replace(char, "-")
+    return text
 
 
 def extract_page_text_boxes(
@@ -89,24 +95,21 @@ def extract_page_text_boxes(
     """
     textpage = page.get_textpage()
     try:
-        char_boxes = [textpage.get_charbox(i) for i in range(textpage.count_chars())]
-
         result: List[Tuple[List[List[float]], str]] = []
-        for obj in page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_TEXT]):
-            left_b, bottom_b, right_b, top_b = _object_pos(obj)
-            indices = [
-                i
-                for i, box in enumerate(char_boxes)
-                if _center_inside(box, left_b, bottom_b, right_b, top_b)
-            ]
-            if not indices:
-                continue
-
-            text = "".join(textpage.get_text_range(i, 1) for i in indices).strip()
+        for indices in _chars_by_text_object(textpage):
+            chars = [textpage.get_text_range(i, 1) for i in indices]
+            text = _restore_hyphens("".join(chars)).strip()
             if not text:
                 continue
 
-            boxes = [char_boxes[i] for i in indices]
+            # loose=True: рамка по ширине символа и высоте шрифта из самого PDF,
+            # а не по контурам глифа — не зависит от наличия шрифта в системе.
+            # Пробелы/переводы строк в рамку не входят (у них нулевая высота).
+            boxes = [
+                textpage.get_charbox(i, loose=True)
+                for i, char in zip(indices, chars, strict=True)
+                if char.strip()
+            ]
             left = min(b[0] for b in boxes)
             bottom = min(b[1] for b in boxes)
             right = max(b[2] for b in boxes)

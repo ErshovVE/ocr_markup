@@ -191,3 +191,8 @@ def test_extract_box_covers_rendered_ink_on_rotated_pages(rotate):
     (x0, y0), (x1, y1) = box[0], box[2]
     assert x0 <= xs.min() + 2 and xs.max() <= x1 + 2
     assert y0 <= ys.min() + 2 and ys.max() <= y1 + 2
+
+
+def test_restore_hyphens_turns_soft_hyphen_markers_into_dash():
+    assert pdf_extract._restore_hyphens("на фо\ufffe") == "на фо-"
+    assert pdf_extract._restore_hyphens("стан\x02дарт") == "стан-дарт"

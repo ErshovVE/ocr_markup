@@ -23,7 +23,8 @@ Frontend and backend are independent services with separate dependency sets:
 
 ```bash
 pip install -r frontend/requirements.txt   # the Streamlit app
-pip install -r backend/requirements.txt    # the FastAPI OCR-consensus spike
+pip install uv                            # backend needs uv's --override, see backend/overrides.txt
+uv pip install -r backend/requirements.txt --override backend/overrides.txt  # the FastAPI OCR-consensus spike
 pip install -r requirements-dev.txt        # pytest, ruff — shared by both
 ```
 
