@@ -105,6 +105,29 @@ def test_document_has_text_layer_false_for_fully_blank_document(blank_pdf_doc):
     assert pdf_extract.document_has_text_layer(blank_pdf_doc) is False
 
 
+def test_document_has_text_layer_true_for_clean_layer():
+    line = "The standard applies to washers for machine tools"
+    doc = pdfium.PdfDocument(_build_pdf([(line, 10, 300)] * 3, page_w=600))
+    try:
+        assert pdf_extract.document_has_text_layer(doc) is True
+    finally:
+        doc.close()
+
+
+def test_document_has_text_layer_false_for_garbage_layer():
+    # Слой есть, но это мусорное OCR сканера — документ должен уйти в OCR.
+    line = "Th3 st4nd@rd app1ies t0 w4sh#rs f0r m4ch1ne"
+    doc = pdfium.PdfDocument(_build_pdf([(line, 10, 300)] * 3, page_w=600))
+    try:
+        assert pdf_extract.document_has_text_layer(doc) is False
+    finally:
+        doc.close()
+
+
+def test_page_words(text_pdf_doc):
+    assert pdf_extract.page_words(text_pdf_doc[0]) == ["Hello", "World"]
+
+
 def test_render_page_returns_rgb_uint8_array(text_pdf_doc):
     image = pdf_extract.render_page(text_pdf_doc[0], dpi=200)
     assert image.ndim == 3

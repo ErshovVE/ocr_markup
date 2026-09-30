@@ -12,6 +12,8 @@ from typing import List, Tuple
 import numpy as np
 import pypdfium2 as pdfium
 
+from backend import text_layer_quality
+
 PDF_RENDER_DPI = 200
 PROBE_PAGE_COUNT = 2
 
@@ -129,17 +131,35 @@ def page_has_text_layer(page: pdfium.PdfPage) -> bool:
         textpage.close()
 
 
+def page_words(page: pdfium.PdfPage) -> List[str]:
+    """Слова текстового слоя страницы (для оценки качества, без координат)"""
+    textpage = page.get_textpage()
+    try:
+        return textpage.get_text_bounded().split()
+    finally:
+        textpage.close()
+
+
 def document_has_text_layer(
     pdf_doc: pdfium.PdfDocument, probe_pages: int = PROBE_PAGE_COUNT
 ) -> bool:
     """Решение "использовать текстовый слой" на уровне всего документа.
 
-    Проверяет только первые `probe_pages` страниц (по умолчанию 2) — если ни
-    одна из них не содержит текста, документ целиком обрабатывается через
-    обычный OCR-консенсус, даже если текстовый слой появляется на более
-    поздних страницах (осознанное упрощение, см. план/PRD).
+    1. Наличие: проверяются только первые `probe_pages` страниц (по умолчанию
+       2) — если ни одна не содержит текста, документ целиком обрабатывается
+       через обычный OCR-консенсус, даже если текстовый слой появляется на
+       более поздних страницах (осознанное упрощение, см. план/PRD).
+    2. Качество: слой сканов — чужое OCR, на машинописи и плохих сканах часто
+       мусорный. Если хороших страниц по всему документу слишком мало
+       (text_layer_quality.layer_is_trustworthy), документ тоже идёт в OCR,
+       а не попадает в good.txt как есть.
     """
-    for page_index in range(min(probe_pages, len(pdf_doc))):
-        if page_has_text_layer(pdf_doc[page_index]):
-            return True
-    return False
+    has_text = any(
+        page_has_text_layer(pdf_doc[page_index])
+        for page_index in range(min(probe_pages, len(pdf_doc)))
+    )
+    if not has_text:
+        return False
+    pages_words = [page_words(pdf_doc[page_index]) for page_index in range(len(pdf_doc))]
+    qualities = text_layer_quality.page_qualities(pages_words)
+    return text_layer_quality.layer_is_trustworthy(qualities)
