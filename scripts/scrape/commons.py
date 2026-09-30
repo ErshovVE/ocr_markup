@@ -45,12 +45,15 @@ ALLOWED_MIMES = {"image/jpeg", "image/png", "image/tiff", "image/webp"}
 # Эти форматы качаем только через миниатюру (Commons отдаёт её в jpg/png).
 THUMB_ONLY_MIMES = {"image/tiff", "image/webp"}
 
-EXTMETADATA_FIELDS = "LicenseShortName|LicenseUrl|Artist|ImageDescription|UsageTerms"
+EXTMETADATA_FIELDS = (
+    "LicenseShortName|LicenseUrl|Artist|ImageDescription|UsageTerms|DateTimeOriginal"
+)
 BATCH = 50  # максимум generator'а для обычных (не bot) аккаунтов
 MAX_RETRIES = 5
 
 _WINDOWS_BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _TAG = re.compile(r"<[^>]+>")
+_YEAR = re.compile(r"(?<!\d)(1[0-9]{3}|20[0-9]{2})(?!\d)")
 
 
 def strip_html(value: str) -> str:
@@ -67,6 +70,17 @@ def safe_filename(title: str, sha1: str, ext: str, max_len: int = 100) -> str:
     stem = _WINDOWS_BAD.sub("_", stem)
     stem = re.sub(r"\s+", "_", stem).strip("._") or "file"
     return f"{sha1[:8]}_{stem[:max_len]}{ext}"
+
+
+def guess_year(record: dict):
+    """Самый ранний год из даты, названия и описания файла.
+
+    DateTimeOriginal часто — дата съёмки/скана, а не документа, поэтому одной
+    ей не верим. Берём минимум: для отсева старых рукописей лучше лишний раз
+    выбросить."""
+    text = " ".join(record.get(k, "") or "" for k in ("date", "title", "description"))
+    years = [int(y) for y in _YEAR.findall(text)]
+    return min(years) if years else None
 
 
 class CommonsClient:
@@ -214,8 +228,10 @@ def to_record(page: dict, source: str, max_width: int):
         "license_url": field("LicenseUrl"),
         "artist": field("Artist"),
         "description": field("ImageDescription"),
+        "date": field("DateTimeOriginal"),
         "source": source,
     }
+    record["year"] = guess_year(record)
     return url, record
 
 
@@ -269,6 +285,8 @@ def run(client: CommonsClient, args) -> int:
                 continue
             if license_re and not license_re.search(record["license"]):
                 continue
+            if args.min_year and record["year"] is not None and record["year"] < args.min_year:
+                continue
 
             ext = Path(url.split("?", 1)[0]).suffix.lower() or ".jpg"
             name = safe_filename(record["title"], record["sha1"] or "00000000", ext)
@@ -317,6 +335,13 @@ def parse_args(argv=None):
     )
     parser.add_argument("--min-width", type=int, default=600, help="уже — пропускаем")
     parser.add_argument("--license-regex", default="", help="фильтр по LicenseShortName")
+    parser.add_argument(
+        "--min-year",
+        type=int,
+        default=0,
+        help="пропускать файлы с годом раньше этого (1918 — без дореформенной орфографии);"
+        " файлы без распознанного года остаются",
+    )
     parser.add_argument("--delay", type=float, default=0.5, help="пауза между запросами, с")
     parser.add_argument(
         "--user-agent",

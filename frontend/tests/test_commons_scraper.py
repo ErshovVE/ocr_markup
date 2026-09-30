@@ -148,3 +148,24 @@ def test_safe_filename_is_windows_safe():
     name = commons.safe_filename('File:Письмо: "1905" / лист*1.jpeg', "0123456789", ".jpg")
     assert name == "01234567_Письмо___1905____лист_1.jpg"
     assert not any(ch in name for ch in '<>:"/\\|?*')
+
+
+def test_guess_year_takes_earliest_year_across_fields():
+    # дата скана 2017, а сам документ 1795
+    record = {"date": "2017-02-08", "title": "File:БИз РС 1795.jpg", "description": ""}
+    assert commons.guess_year(record) == 1795
+
+
+def test_guess_year_none_without_years():
+    assert commons.guess_year({"date": "", "title": "File:Russian cursive.jpg"}) is None
+
+
+def test_to_record_stores_year():
+    page = _page("File:Old family document. 1914.jpg", "abc")
+    _, record = commons.to_record(page, "src", 2000)
+    assert record["year"] == 1914
+
+
+def test_min_year_is_parsed():
+    args = _args(Path("out"), category="X", min_year=1918)
+    assert args.min_year == 1918
