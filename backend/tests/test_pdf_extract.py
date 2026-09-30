@@ -218,3 +218,83 @@ def test_extract_box_padding_is_clamped_to_image():
 
     (x0, y0), (x1, y1) = box[0], box[2]
     assert 0 <= x0 and 0 <= y0 and x1 <= width and y1 <= height
+
+
+def _build_styled_pdf(lines: List[Tuple[str, str, float, int]]) -> bytes:
+    """PDF из одной страницы 600×400: каждая строка — (text, BaseFont, кегль, y),
+    своим шрифтом (Type1 из стандартных 14 или с префиксом подмножества),
+    отдельным BT/Tj/ET — отдельным text-объектом."""
+    fonts = sorted({base for _, base, _, _ in lines})
+    font_num = {base: 5 + i for i, base in enumerate(fonts)}
+    font_refs = " ".join(f"/F{font_num[b]} {font_num[b]} 0 R" for b in fonts)
+    stream = "\n".join(
+        f"BT /F{font_num[base]} {size} Tf 20 {y} Td ({text}) Tj ET" for text, base, size, y in lines
+    ).encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 400] "
+            f"/Resources << /Font << {font_refs} >> >> /Contents 4 0 R >>"
+        ).encode(),
+        f"<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"\nendstream",
+    ] + [f"<< /Type /Font /Subtype /Type1 /BaseFont /{b} >>".encode() for b in fonts]
+
+    buf = io.BytesIO()
+    buf.write(b"%PDF-1.4\n")
+    offsets = []
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(buf.tell())
+        buf.write(f"{i} 0 obj\n".encode() + obj + b"\nendobj\n")
+    xref_offset = buf.tell()
+    buf.write(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
+    for off in offsets:
+        buf.write(f"{off:010d} 00000 n \n".encode())
+    buf.write(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF".encode()
+    )
+    return buf.getvalue()
+
+
+STYLED_LINES = [
+    ("Regular line", "Helvetica", 24, 340),
+    ("Bold line", "Helvetica-Bold", 12, 280),
+    ("Oblique line", "Helvetica-Oblique", 16, 220),
+    ("Bold italic line", "Times-BoldItalic", 10.5, 160),
+    ("Subset font line", "ABCDEF+Courier", 8, 100),
+]
+
+
+@pytest.fixture
+def styled_page():
+    doc = pdfium.PdfDocument(_build_styled_pdf(STYLED_LINES))
+    yield doc[0]
+    doc.close()
+
+
+def test_extract_page_text_lines_reports_font_size_bold_italic(styled_page):
+    lines = pdf_extract.extract_page_text_lines(styled_page, 600, 400, rng=random.Random(0))
+
+    got = {line.text: line.style for line in lines}
+    assert set(got) == {text for text, _, _, _ in STYLED_LINES}
+    for text, base, size, _ in STYLED_LINES:
+        style = got[text]
+        assert style.font_size == pytest.approx(size, abs=0.01), text
+        assert style.bold == ("Bold" in base), text
+        assert style.italic == ("Italic" in base or "Oblique" in base), text
+
+
+def test_extract_page_text_lines_strips_subset_prefix(styled_page):
+    lines = pdf_extract.extract_page_text_lines(styled_page, 600, 400, rng=random.Random(0))
+
+    names = {line.text: line.style.font_name for line in lines}
+    assert names["Subset font line"] == "Courier"
+    assert names["Bold line"] == "Helvetica-Bold"
+
+
+def test_extract_page_text_boxes_matches_lines_with_same_seed(styled_page):
+    lines = pdf_extract.extract_page_text_lines(styled_page, 600, 400, rng=random.Random(7))
+    boxes = pdf_extract.extract_page_text_boxes(styled_page, 600, 400, rng=random.Random(7))
+
+    assert boxes == [(line.box, line.text) for line in lines]

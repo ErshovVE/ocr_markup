@@ -192,6 +192,20 @@ taken from the layer if they have any text. The heuristic has no dictionary,
 so plausible-looking misspellings still pass — for folders known to have bad
 layers, explicitly turn off `extract_pdf_text_layer`.
 
+**Line style, as a library call**: `pdf_extract.extract_page_text_lines(page,
+width, height, rng=None)` returns the same boxes and texts as
+`extract_page_text_boxes` (which is built on it, with the same `rng` draw
+order), plus a `TextStyle` per line: `font_name` (base font name without the
+`ABCDEF+` subset prefix), `font_size` in points, `bold`, `italic`. A PDF text
+object has one font and size, so the first non-blank character's style is the
+whole line's. Bold is read from the font name (`Bold`/`Black`/`Heavy`/
+`Semibold`/`Demi`), weight ≥ 600 or the ForceBold flag — pdfium reports weight
+400 even for `LiberationSans-Bold` in LibreOffice PDFs; italic from the name
+(`Italic`/`Oblique`) or the Italic flag. The service pipeline doesn't use it —
+it's for dataset generators outside this repo (doc-generator's line balancer
+imports `backend/pdf_extract.py` directly) that need to know which font each
+crop was printed in.
+
 ## VLM mode (`mode="vlm"`)
 
 A second auto-labeling path (`backend/pipeline_vlm.py`). Instead of the

@@ -8,6 +8,8 @@ docs/testing.md).
 
 import ctypes
 import random
+import re
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -24,6 +26,35 @@ PDF_RENDER_DPI = 200
 TEXT_BOX_PAD_X_RANGE = (1, 3)  # слева и справа
 TEXT_BOX_PAD_Y_RANGE = (0, 2)  # сверху и снизу
 _RNG = random.Random()
+
+# Флаги шрифта PDF (FontDescriptor /Flags, ISO 32000-1 табл. 123), которые
+# pdfium отдаёт через FPDFText_GetFontInfo.
+_FONT_FLAG_ITALIC = 1 << 6
+_FONT_FLAG_FORCE_BOLD = 1 << 18
+# Жирность по имени: FPDFText_GetFontWeight на PDF из LibreOffice всегда 400
+# даже для LiberationSans-Bold, так что имя — основной источник.
+_BOLD_NAME = re.compile(r"bold|black|heavy|semibold|demi", re.IGNORECASE)
+_ITALIC_NAME = re.compile(r"italic|oblique", re.IGNORECASE)
+_SUBSET_PREFIX = re.compile(r"^[A-Z]{6}\+")
+
+
+@dataclass
+class TextStyle:
+    """Оформление строки текстового слоя, как его видит pdfium."""
+
+    font_name: str  # базовое имя шрифта без префикса подмножества (ABCDEF+)
+    font_size: float  # кегль в пунктах с учётом матрицы текста
+    bold: bool
+    italic: bool
+
+
+@dataclass
+class TextLine:
+    """Строка текстового слоя: рамка в пикселях рендера, текст и оформление."""
+
+    box: List[List[float]]
+    text: str
+    style: TextStyle
 
 
 def render_page(page: pdfium.PdfPage, dpi: int = PDF_RENDER_DPI) -> np.ndarray:
@@ -109,6 +140,73 @@ def _random_pad(rng: random.Random) -> Tuple[int, int, int, int]:
     )
 
 
+def _char_style(textpage: pdfium.PdfTextPage, index: int) -> TextStyle:
+    """Оформление символа index. У PDF text-объекта один шрифт и кегль,
+    поэтому стиль первого непробельного символа — стиль всей строки."""
+    flags = ctypes.c_int()
+    size = pdfium.raw.FPDFText_GetFontInfo(textpage.raw, index, None, 0, ctypes.byref(flags))
+    buffer = ctypes.create_string_buffer(max(size, 1))
+    pdfium.raw.FPDFText_GetFontInfo(textpage.raw, index, buffer, size, ctypes.byref(flags))
+    name = _SUBSET_PREFIX.sub("", buffer.value.decode("utf-8", "replace"))
+    weight = pdfium.raw.FPDFText_GetFontWeight(textpage.raw, index)
+    return TextStyle(
+        font_name=name,
+        font_size=round(pdfium.raw.FPDFText_GetFontSize(textpage.raw, index), 2),
+        bold=bool(_BOLD_NAME.search(name))
+        or weight >= 600
+        or bool(flags.value & _FONT_FLAG_FORCE_BOLD),
+        italic=bool(_ITALIC_NAME.search(name)) or bool(flags.value & _FONT_FLAG_ITALIC),
+    )
+
+
+def extract_page_text_lines(
+    page: pdfium.PdfPage,
+    image_width: int,
+    image_height: int,
+    rng: Optional[random.Random] = None,
+) -> List[TextLine]:
+    """Строки текстового слоя страницы вместе с оформлением (шрифт, кегль,
+    жирный, курсив) — для генераторов датасета, которым нужно знать, каким
+    шрифтом напечатан каждый кроп (балансировка по шрифтам/кеглям/стилям).
+
+    Рамки и тексты — те же, что у extract_page_text_boxes (она построена на
+    этой функции), с тем же порядком обращений к rng."""
+    textpage = page.get_textpage()
+    try:
+        result: List[TextLine] = []
+        for indices in _chars_by_text_object(textpage):
+            chars = [textpage.get_text_range(i, 1) for i in indices]
+            text = _restore_hyphens("".join(chars)).strip()
+            if not text:
+                continue
+
+            # loose=True: рамка по ширине символа и высоте шрифта из самого PDF,
+            # а не по контурам глифа — не зависит от наличия шрифта в системе.
+            # Пробелы/переводы строк в рамку не входят (у них нулевая высота).
+            ink = [i for i, char in zip(indices, chars, strict=True) if char.strip()]
+            boxes = [textpage.get_charbox(i, loose=True) for i in ink]
+            left = min(b[0] for b in boxes)
+            bottom = min(b[1] for b in boxes)
+            right = max(b[2] for b in boxes)
+            top = max(b[3] for b in boxes)
+
+            rect = _pixel_rect(
+                page,
+                left,
+                bottom,
+                right,
+                top,
+                image_width,
+                image_height,
+                pad=_random_pad(rng or _RNG),
+            )
+            result.append(TextLine(box=rect, text=text, style=_char_style(textpage, ink[0])))
+
+        return result
+    finally:
+        textpage.close()
+
+
 def extract_page_text_boxes(
     page: pdfium.PdfPage,
     image_width: int,
@@ -130,44 +228,12 @@ def extract_page_text_boxes(
     К рамке добавляется случайное поле (TEXT_BOX_PAD_X_RANGE по горизонтали,
     TEXT_BOX_PAD_Y_RANGE по вертикали, независимо для каждой стороны); rng —
     источник случайности (по умолчанию общий модульный, в тестах — с seed).
+    Оформление строк — extract_page_text_lines.
     """
-    textpage = page.get_textpage()
-    try:
-        result: List[Tuple[List[List[float]], str]] = []
-        for indices in _chars_by_text_object(textpage):
-            chars = [textpage.get_text_range(i, 1) for i in indices]
-            text = _restore_hyphens("".join(chars)).strip()
-            if not text:
-                continue
-
-            # loose=True: рамка по ширине символа и высоте шрифта из самого PDF,
-            # а не по контурам глифа — не зависит от наличия шрифта в системе.
-            # Пробелы/переводы строк в рамку не входят (у них нулевая высота).
-            boxes = [
-                textpage.get_charbox(i, loose=True)
-                for i, char in zip(indices, chars, strict=True)
-                if char.strip()
-            ]
-            left = min(b[0] for b in boxes)
-            bottom = min(b[1] for b in boxes)
-            right = max(b[2] for b in boxes)
-            top = max(b[3] for b in boxes)
-
-            rect = _pixel_rect(
-                page,
-                left,
-                bottom,
-                right,
-                top,
-                image_width,
-                image_height,
-                pad=_random_pad(rng or _RNG),
-            )
-            result.append((rect, text))
-
-        return result
-    finally:
-        textpage.close()
+    return [
+        (line.box, line.text)
+        for line in extract_page_text_lines(page, image_width, image_height, rng)
+    ]
 
 
 def page_words(page: pdfium.PdfPage) -> List[str]:
