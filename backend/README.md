@@ -174,10 +174,17 @@ each PDF, the first 2 pages are checked for an extractable text layer first
   page as a regular raster image, through the same OCR consensus with the
   selected `engines`/`min_agree`.
 
-**Known limitation**: a "text layer" isn't distinguished from text added by
-the scanner itself (a searchable PDF from scanning software) — such a layer
-can be inaccurate (the scanner's own OCR), but will be trustingly marked as
-`good`. For folders with such scans, explicitly turn off
+**Text-layer quality check**: a scan's text layer is usually the scanner's
+own OCR (a searchable PDF) and can be inaccurate or outright garbage —
+typewritten pages especially. So besides presence, the layer's quality is
+checked across the whole document (`backend/text_layer_quality.py`): each
+page's share of plausible words (no mixed alphabets, no Latin look-alikes of
+Cyrillic letters inside Russian text, no long vowel-less words, no stray
+symbols). If fewer than 80% of the pages with enough text (≥ 5 words) look
+clean, the document goes through OCR consensus instead. Pages with too little
+text aren't judged; if no page can be judged, the layer is trusted. The
+heuristic has no dictionary, so plausible-looking misspellings still pass —
+for folders known to have bad layers, explicitly turn off
 `extract_pdf_text_layer`.
 
 ## VLM mode (`mode="vlm"`)
