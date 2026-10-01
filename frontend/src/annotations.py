@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -11,6 +12,27 @@ from src.i18n import t
 from src.models import ImageRecord
 
 DEBUG_FILENAME = "debug.jsonl"
+
+# Необязательный хвост строки датасета "\t{w}\t{h}" — размер кропа в пикселях
+# (backend/pipeline.py::_dataset_line при append_crop_size=True).
+_CROP_SIZE_SUFFIX_RE = re.compile(r"^(.*)\t(\d+)\t(\d+)$", re.DOTALL)
+
+
+def split_crop_size(annotation: str) -> Tuple[str, Optional[Tuple[int, int]]]:
+    """Отделяет от текста аннотации хвост "\\t{w}\\t{h}", если он есть.
+    Возвращает (текст, (w, h)) или (текст, None)."""
+    match = _CROP_SIZE_SUFFIX_RE.match(annotation)
+    if not match:
+        return annotation, None
+    return match.group(1), (int(match.group(2)), int(match.group(3)))
+
+
+def format_line(relative_path: str, annotation: str, crop_size: Optional[Tuple[int, int]]) -> str:
+    """Строка rec.txt-формата (без перевода строки); размер кропа — только если был."""
+    if crop_size is None:
+        return f"{relative_path}\t{annotation}"
+    width, height = crop_size
+    return f"{relative_path}\t{annotation}\t{width}\t{height}"
 
 
 class AnnotationManager:
@@ -48,15 +70,15 @@ class AnnotationManager:
 
                 parts = line.split("\t", 1)
                 relative_path = parts[0].strip()
-                annotation = parts[1].strip() if len(parts) == 2 else ""
+                annotation, crop_size = split_crop_size(parts[1]) if len(parts) == 2 else ("", None)
+                annotation = annotation.strip()
 
                 absolute_path = (self.base_dir / relative_path).resolve()
 
                 if not absolute_path.is_relative_to(resolved_base_dir):
                     continue
                 if not (
-                    absolute_path.exists()
-                    and absolute_path.suffix.lower() in image_extensions
+                    absolute_path.exists() and absolute_path.suffix.lower() in image_extensions
                 ):
                     # Картинки нет на диске (или это не изображение). Такую
                     # строку save_changes затем НЕ перезапишет в rec.txt —
@@ -70,6 +92,7 @@ class AnnotationManager:
                     relative_path=relative_path,
                     absolute_path=str(absolute_path),
                     annotation=annotation,
+                    crop_size=crop_size,
                 )
 
             if skipped_missing:
@@ -152,6 +175,17 @@ class AnnotationManager:
             self.records[img_name].is_marked = True
             self.modified_records.add(img_name)
 
+    def swap_crop_size(self, img_name: str):
+        """После поворота кропа на 90° меняет местами ширину и высоту в
+        записанном размере (если строка его несёт) — иначе сохранённый
+        rec.txt разойдётся с картинкой на диске."""
+        record = self.records.get(img_name)
+        if record is None or record.crop_size is None:
+            return
+        width, height = record.crop_size
+        record.crop_size = (height, width)
+        self.modified_records.add(img_name)
+
     def delete_record(self, img_name: str, create_backup: bool = True) -> bool:
         """Удаляет запись об изображении"""
         if img_name not in self.records:
@@ -193,19 +227,17 @@ class AnnotationManager:
             # Сохраняем файл аннотаций
             lines = []
             for record in self.records.values():
-                lines.append(f"{record.relative_path}\t{record.annotation}\n")
+                lines.append(
+                    format_line(record.relative_path, record.annotation, record.crop_size) + "\n"
+                )
 
             self.annotation_file.write_text("".join(lines), encoding="utf-8")
 
             # Сохраняем кэш статусов
             if self.cache_path:
                 self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-                marked_names = [
-                    name for name, rec in self.records.items() if rec.is_marked
-                ]
-                self.cache_path.write_text(
-                    "\n".join(sorted(marked_names)) + "\n", encoding="utf-8"
-                )
+                marked_names = [name for name, rec in self.records.items() if rec.is_marked]
+                self.cache_path.write_text("\n".join(sorted(marked_names)) + "\n", encoding="utf-8")
 
             self.modified_records.clear()
             return True, t("changes_saved")
@@ -225,9 +257,7 @@ class AnnotationManager:
             return list(self.records.keys())
 
 
-def save_as_handwritten(
-    manager: AnnotationManager, img_name: str, annotation: str
-) -> bool:
+def save_as_handwritten(manager: AnnotationManager, img_name: str, annotation: str) -> bool:
     """Сохраняет изображение как рукописный текст"""
     try:
         record = manager.records[img_name]
@@ -248,7 +278,7 @@ def save_as_handwritten(
         # Добавляем в handwritten.txt
         handwritten_txt = manager.base_dir / "handwritten.txt"
         rel_path = f"handwritten_images/{record.relative_path}".replace("\\", "/")
-        new_line = f"{rel_path}\t{annotation}"
+        new_line = format_line(rel_path, annotation, record.crop_size)
 
         # Проверяем дубликаты — по точному совпадению строки (docs/architecture.md),
         # а не по подстроке (короткая аннотация могла быть префиксом другой).

@@ -10,7 +10,8 @@ _crop_paths/_save_crop/MIN_CROP_PIX импортируются из backend.pipe
 run() повторяет сигнатуру и семантику callback'ов backend.pipeline.run
 (on_found/on_file_done/on_line_done/on_error/should_cancel), поэтому
 backend/jobs.py выбирает run_fn по mode без ветвления по полям трекера.
-Формат строк good.txt/needs_review.txt (``{crop_rel}\\t{text}\\n``) и записей
+Формат строк good.txt/needs_review.txt (``{crop_rel}\\t{text}\\n``, опционально
+с ``\\t{w}\\t{h}`` — общий backend.pipeline._dataset_line) и записей
 debug.jsonl — идентичен классическому, только score всегда 1.0 (VLM per-line
 confidence не дают).
 
@@ -46,6 +47,7 @@ from backend.config import (
 )
 from backend.pipeline import (
     _crop_paths,
+    _dataset_line,
     _is_big_enough,
     _resume_img_count,
     _save_crop,
@@ -218,7 +220,7 @@ def _write_page(
     page_lines: PageLines,
     vlm_min_agree: int,
     iou_threshold: float,
-    write_line: Callable[[str, str], None],
+    write_line: Callable[[str, str, str, np.ndarray], None],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]],
     on_error: Optional[Callable[[str], None]],
@@ -241,7 +243,7 @@ def _write_page(
 
             crop_relative, crop_absolute = allocate_crop_path()
             _save_crop(crop, crop_absolute)
-            write_line(bucket, f"{crop_relative}\t{text}\n")
+            write_line(bucket, crop_relative, text, crop)
             if on_line_done:
                 on_line_done(bucket, diverged)
             if write_debug:
@@ -343,12 +345,15 @@ def run(
     on_line_done: Optional[Callable[[str, bool], None]] = None,
     on_error: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    append_crop_size: bool = False,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов через одну или несколько VLM.
 
     vlm_engines — подмножество backend.config.VLM_ENGINES; vlm_min_agree —
     сколько движков должны отдать совпадающий по IoU бокс с одинаковым текстом
     для "good"; iou_threshold — порог сопоставления боксов разных движков.
+    append_crop_size — дописывать в строку датасета ширину/высоту кропа
+    (см. backend.pipeline._dataset_line).
 
     Обход «модель за моделью» (см. докстринг модуля): все модели, кроме
     последней, проходят папку и копят строки; последняя проходит её, сводит
@@ -386,10 +391,10 @@ def run(
         open(os.path.join(output_dir, "debug.jsonl"), "w", encoding="utf-8") as debug_file,
     ):
 
-        def write_line(bucket: str, line: str) -> None:
+        def write_line(bucket: str, crop_relative: str, text: str, crop: np.ndarray) -> None:
             nonlocal good_count, review_count
             target = good_file if bucket == "good" else review_file
-            target.write(line)
+            target.write(_dataset_line(crop_relative, text, crop, append_crop_size))
             target.flush()
             if bucket == "good":
                 good_count += 1

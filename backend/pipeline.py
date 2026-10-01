@@ -299,6 +299,16 @@ def _save_crop(img_crop: np.ndarray, absolute_path: str) -> None:
     Image.fromarray(img_crop).save(absolute_path, "WEBP", lossless=True, quality=100)
 
 
+def _dataset_line(crop_relative: str, text: str, crop: np.ndarray, append_crop_size: bool) -> str:
+    """Строка good.txt/needs_review.txt: "{кроп}\\t{текст}", при append_crop_size —
+    ещё "\\t{w}\\t{h}" (размер кропа в пикселях, как он сохранён на диск).
+    Общая для классического и VLM-пути (backend/pipeline_vlm.py)."""
+    if append_crop_size:
+        height, width = crop.shape[:2]
+        return f"{crop_relative}\t{text}\t{width}\t{height}\n"
+    return f"{crop_relative}\t{text}\n"
+
+
 def list_input_files(input_dir: str) -> Tuple[List[str], List[str]]:
     """Входные документы папки (без рекурсии): (картинки, PDF), каждый список
     отсортирован по имени.
@@ -332,7 +342,7 @@ def _process_boxes(
     latin_model_size: str,
     tesseract_lang: str,
     source_label: str,
-    write_line: Callable[[str, str], None],
+    write_line: Callable[[str, str, str, np.ndarray], None],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]] = None,
     on_error: Optional[Callable[[str], None]] = None,
@@ -364,7 +374,7 @@ def _process_boxes(
     движком она была сделана).
 
     Общая логика для растровых изображений и страниц PDF без текстового слоя
-    (см. run()/_process_pdf()). write_line(bucket, line) пишет строку в
+    (см. run()/_process_pdf()). write_line(bucket, crop_rel, text, crop) пишет строку в
     good.txt/needs_review.txt сразу после голосования (см. run()) — если
     задание упадёт на середине большой папки, готовые строки не теряются.
     on_line_done(bucket, diverged) — живой прогресс для трекера
@@ -422,7 +432,7 @@ def _write_voted_line(
     min_agree: int,
     detector_engine: str,
     source_label: str,
-    write_line: Callable[[str, str], None],
+    write_line: Callable[[str, str, str, np.ndarray], None],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]],
     on_error: Optional[Callable[[str], None]],
@@ -447,7 +457,7 @@ def _write_voted_line(
 
         crop_relative, crop_absolute = allocate_crop_path()
         _save_crop(img_crop, crop_absolute)
-        write_line(bucket, f"{crop_relative}\t{text}\n")
+        write_line(bucket, crop_relative, text, img_crop)
         if on_line_done:
             on_line_done(bucket, diverged)
         if write_debug:
@@ -478,7 +488,7 @@ def _process_pdf(
     latin_model_size: str,
     tesseract_lang: str,
     extract_pdf_text_layer: bool,
-    write_line: Callable[[str, str], None],
+    write_line: Callable[[str, str, str, np.ndarray], None],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]] = None,
     on_error: Optional[Callable[[str], None]] = None,
@@ -572,7 +582,7 @@ def _process_pdf_page(
     lang: str,
     latin_model_size: str,
     tesseract_lang: str,
-    write_line: Callable[[str, str], None],
+    write_line: Callable[[str, str, str, np.ndarray], None],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]],
     on_error: Optional[Callable[[str], None]],
@@ -611,7 +621,7 @@ def _process_pdf_page(
                     continue
                 crop_relative, crop_absolute = allocate_crop_path()
                 _save_crop(img_crop, crop_absolute)
-                write_line("good", f"{crop_relative}\t{text}\n")
+                write_line("good", crop_relative, text, img_crop)
                 if on_line_done:
                     on_line_done("good", False)
             except Exception as e:
@@ -660,12 +670,15 @@ def run(
     on_error: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     pdf_ocr_fallback: bool = True,
+    append_crop_size: bool = False,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов (изображения + PDF): детекция ->
     распознавание выбранными движками -> голосование; для PDF с текстовым
     слоем — прямое извлечение текста+координат без OCR (см. extract_pdf_text_layer).
     pdf_ocr_fallback=False — страницы PDF без годного слоя пропускаются, а не
     распознаются (изображения из input_dir по-прежнему идут через OCR).
+    append_crop_size=True — в конец каждой строки датасета через табуляцию
+    дописываются ширина и высота кропа в пикселях (см. _dataset_line).
 
     engines/min_agree — схема выбора движков распознавания ("1 из 1"/
     "1 из 2"/"2 из 2"/"2 из 3", см. RunRequest в backend/main.py и
@@ -730,10 +743,10 @@ def run(
         open(os.path.join(output_dir, "debug.jsonl"), "w", encoding="utf-8") as debug_file,
     ):
 
-        def write_line(bucket: str, line: str) -> None:
+        def write_line(bucket: str, crop_relative: str, text: str, crop: np.ndarray) -> None:
             nonlocal good_count, review_count
             target = good_file if bucket == "good" else review_file
-            target.write(line)
+            target.write(_dataset_line(crop_relative, text, crop, append_crop_size))
             target.flush()
             if bucket == "good":
                 good_count += 1

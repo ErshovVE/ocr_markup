@@ -19,9 +19,7 @@ def test_load_from_file_parses_existing_images(tmp_path):
     _make_image(tmp_path / "images" / "b.png")
     manager = _manager(tmp_path)
 
-    ok, msg = manager.load_from_file(
-        "images/a.png\tтекст a\nimages/b.png\tтекст b\n"
-    )
+    ok, msg = manager.load_from_file("images/a.png\tтекст a\nimages/b.png\tтекст b\n")
 
     assert ok is True
     assert msg == ""
@@ -99,6 +97,48 @@ def test_save_changes_writes_annotation_file_and_status_cache(tmp_path):
     cache_content = manager.cache_path.read_text(encoding="utf-8")
     assert "a.png" in cache_content
     assert manager.modified_records == set()
+
+
+def test_load_from_file_splits_crop_size_suffix_from_annotation(tmp_path):
+    _make_image(tmp_path / "images" / "a.png")
+    _make_image(tmp_path / "images" / "b.png")
+    manager = _manager(tmp_path)
+
+    manager.load_from_file("images/a.png\tтекст 12\t120\t32\nimages/b.png\t2024\n")
+
+    assert manager.records["a.png"].annotation == "текст 12"
+    assert manager.records["a.png"].crop_size == (120, 32)
+    # Число в тексте без двух хвостовых колонок — это текст, а не размер.
+    assert manager.records["b.png"].annotation == "2024"
+    assert manager.records["b.png"].crop_size is None
+
+
+def test_save_changes_keeps_crop_size_only_where_it_was(tmp_path):
+    _make_image(tmp_path / "images" / "a.png")
+    _make_image(tmp_path / "images" / "b.png")
+    manager = _manager(tmp_path)
+    manager.load_from_file("images/a.png\told a\t120\t32\nimages/b.png\told b\n")
+    manager.update_annotation("a.png", "new a")
+
+    manager.save_changes(create_backup=False)
+
+    saved = manager.annotation_file.read_text(encoding="utf-8")
+    assert "images/a.png\tnew a\t120\t32\n" in saved
+    assert "images/b.png\told b\n" in saved
+
+
+def test_swap_crop_size_after_rotation(tmp_path):
+    _make_image(tmp_path / "images" / "a.png")
+    _make_image(tmp_path / "images" / "b.png")
+    manager = _manager(tmp_path)
+    manager.load_from_file("images/a.png\tтекст\t120\t32\nimages/b.png\tтекст\n")
+
+    manager.swap_crop_size("a.png")
+    manager.swap_crop_size("b.png")
+
+    assert manager.records["a.png"].crop_size == (32, 120)
+    assert manager.modified_records == {"a.png"}
+    assert manager.records["b.png"].crop_size is None
 
 
 def test_load_from_file_populates_diverged_flag_from_debug_jsonl(tmp_path):

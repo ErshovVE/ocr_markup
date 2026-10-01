@@ -54,6 +54,7 @@ Tab-separated format, one line per image:
 ```
 relative_path\tannotation_text
 ```
+Optionally with the crop size in pixels appended — `relative_path\tannotation_text\twidth\theight` (auto-labeling output with `append_crop_size=true` in `/run`, see `backend/pipeline.py::_dataset_line`). On load the trailing `\t<int>\t<int>` is split off the text into `ImageRecord.crop_size` and written back on save — only for lines that had it; rotating an image by 90° swaps width and height. `handwritten.txt` keeps it the same way.
 Source: `AnnotationManager.load_from_file` (`frontend/src/annotations.py`), `AnnotationManager.save_changes` (`frontend/src/annotations.py`).
 
 ### `status_cache.txt`

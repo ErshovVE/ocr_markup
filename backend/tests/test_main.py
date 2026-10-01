@@ -72,6 +72,25 @@ def test_run_starts_job_and_returns_warnings(client, input_dir, tmp_path, monkey
     assert r.json() == {"job_id": "job-123", "warnings": []}
 
 
+@pytest.mark.parametrize(
+    "payload_extra, expected", [({}, False), ({"append_crop_size": True}, True)]
+)
+def test_run_passes_append_crop_size_to_job(
+    client, input_dir, tmp_path, monkeypatch, payload_extra, expected
+):
+    seen = {}
+
+    def fake_start_job(*a, **k):
+        seen.update(k)
+        return "job-1"
+
+    monkeypatch.setattr(main, "start_job", fake_start_job)
+    payload = {"input_dir": input_dir, "output_dir": str(tmp_path / "o"), **payload_extra}
+    r = client.post("/run", json=payload)
+    assert r.status_code == 200
+    assert seen["append_crop_size"] is expected
+
+
 def test_run_conflict_when_job_already_active(client, input_dir, tmp_path, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("Уже выполняется задание x")
@@ -108,12 +127,18 @@ def test_data_root_guard_rejects_paths_outside_root(tmp_path, monkeypatch):
     outside = tmp_path / "elsewhere"
     outside.mkdir()
 
-    assert c.post(
-        "/run", json={"input_dir": str(outside), "output_dir": str(root / "out")}
-    ).status_code == 400
-    assert c.post(
-        "/run", json={"input_dir": str(root / "in"), "output_dir": str(root / "out")}
-    ).status_code == 200
+    assert (
+        c.post(
+            "/run", json={"input_dir": str(outside), "output_dir": str(root / "out")}
+        ).status_code
+        == 400
+    )
+    assert (
+        c.post(
+            "/run", json={"input_dir": str(root / "in"), "output_dir": str(root / "out")}
+        ).status_code
+        == 200
+    )
     # вернуть модуль в исходное состояние для остальных тестов
     monkeypatch.delenv("OCR_DATA_ROOT", raising=False)
     importlib.reload(main)

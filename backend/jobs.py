@@ -138,6 +138,7 @@ def _run_job(
     vlm_min_agree: int = DEFAULT_VLM_MIN_AGREE,
     iou_threshold: float = DEFAULT_IOU_THRESHOLD,
     pdf_ocr_fallback: bool = True,
+    append_crop_size: bool = False,
 ):
     global _active_job_id
     state = _jobs[job_id]
@@ -177,6 +178,7 @@ def _run_job(
                 on_line_done=on_line_done,
                 on_error=on_error,
                 should_cancel=should_cancel,
+                append_crop_size=append_crop_size,
             )
         else:
             good_count, needs_review_count = pipeline.run(
@@ -196,6 +198,7 @@ def _run_job(
                 on_error=on_error,
                 should_cancel=should_cancel,
                 pdf_ocr_fallback=pdf_ocr_fallback,
+                append_crop_size=append_crop_size,
             )
         final_status = "cancelled" if state.cancel_event.is_set() else "done"
         state.result = {
@@ -234,6 +237,7 @@ def start_job(
     vlm_min_agree: int = DEFAULT_VLM_MIN_AGREE,
     iou_threshold: float = DEFAULT_IOU_THRESHOLD,
     pdf_ocr_fallback: bool = True,
+    append_crop_size: bool = False,
 ) -> str:
     """Запускает pipeline.run / pipeline_vlm.run в фоновом потоке и сразу
     возвращает job_id.
@@ -273,6 +277,7 @@ def start_job(
             vlm_min_agree,
             iou_threshold,
             pdf_ocr_fallback,
+            append_crop_size,
         ),
         daemon=True,
     )

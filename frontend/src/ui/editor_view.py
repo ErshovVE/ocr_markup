@@ -50,9 +50,7 @@ def _render_edit_form(manager: AnnotationManager, current_name: str, record, img
                 t("confirm_btn"), use_container_width=True, type="primary"
             )
         with col2:
-            handwritten = st.form_submit_button(
-                t("handwritten_btn"), use_container_width=True
-            )
+            handwritten = st.form_submit_button(t("handwritten_btn"), use_container_width=True)
 
         if submit:
             clean_text = text_value.replace("\n", " ").replace("\r", " ").strip()
@@ -105,6 +103,7 @@ def _render_action_buttons(manager: AnnotationManager, record, current_name: str
             help=t("rotate_left_help"),
         ):
             if rotate_image(record.absolute_path, "left"):
+                manager.swap_crop_size(current_name)
                 st.rerun()
 
     with col3:
@@ -115,6 +114,7 @@ def _render_action_buttons(manager: AnnotationManager, record, current_name: str
             help=t("rotate_right_help"),
         ):
             if rotate_image(record.absolute_path, "right"):
+                manager.swap_crop_size(current_name)
                 st.rerun()
 
     with col4:

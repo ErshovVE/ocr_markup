@@ -17,7 +17,9 @@ def _make_args(written, **overrides):
         latin_model_size="small",
         tesseract_lang="rus",
         source_label="test.png",
-        write_line=lambda bucket, line: written.append((bucket, line)),
+        write_line=lambda bucket, crop_rel, text, crop: written.append(
+            (bucket, pipeline._dataset_line(crop_rel, text, crop, False))
+        ),
         allocate_crop_path=lambda: ("crops/0/image_00001.webp", "/tmp/crops/0/image_00001.webp"),
         engines=["paddle", "surya"],
         min_agree=1,

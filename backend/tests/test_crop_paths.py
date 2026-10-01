@@ -3,7 +3,13 @@ import os
 import numpy as np
 from PIL import Image
 
-from backend.pipeline import _crop_paths, _resume_img_count, _save_crop, list_input_files
+from backend.pipeline import (
+    _crop_paths,
+    _dataset_line,
+    _resume_img_count,
+    _save_crop,
+    list_input_files,
+)
 
 
 def test_crop_paths_first_folder():
@@ -90,3 +96,14 @@ def test_list_input_files_handles_glob_metacharacters_in_dir_name(tmp_path):
     images, _ = list_input_files(str(folder))
 
     assert [os.path.basename(p) for p in images] == ["a.png"]
+
+
+def test_dataset_line_without_crop_size():
+    crop = np.zeros((32, 120, 3), dtype=np.uint8)
+    assert _dataset_line("crops/0/a.webp", "текст", crop, False) == "crops/0/a.webp\tтекст\n"
+
+
+def test_dataset_line_appends_width_then_height():
+    crop = np.zeros((32, 120, 3), dtype=np.uint8)
+    line = _dataset_line("crops/0/a.webp", "текст", crop, True)
+    assert line == "crops/0/a.webp\tтекст\t120\t32\n"

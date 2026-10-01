@@ -53,6 +53,7 @@ Backend (`backend/`) — FastAPI-спайк консенсуса OCR: см. `bac
 ```
 относительный_путь\tтекст_аннотации
 ```
+Опционально с размером кропа в пикселях в конце — `относительный_путь\tтекст_аннотации\tширина\tвысота` (вывод авторазметки с `append_crop_size=true` в `/run`, см. `backend/pipeline.py::_dataset_line`). При загрузке хвост `\t<int>\t<int>` отделяется от текста в `ImageRecord.crop_size` и записывается обратно при сохранении — только для строк, где он был; поворот картинки на 90° меняет ширину и высоту местами. `handwritten.txt` сохраняет его так же.
 Источник: `AnnotationManager.load_from_file` (`frontend/src/annotations.py`), `AnnotationManager.save_changes` (`frontend/src/annotations.py`).
 
 ### `status_cache.txt`

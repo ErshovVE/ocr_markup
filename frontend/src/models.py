@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -15,3 +16,8 @@ class ImageRecord:
     # рядом с рабочей директорией — для ручной разметки без авторазметки
     # всегда остаётся False.
     diverged: bool = False
+    # (ширина, высота) кропа в пикселях — если строка датасета пришла с
+    # хвостом "\t{w}\t{h}" (авторазметка с append_crop_size, см.
+    # backend/pipeline.py::_dataset_line). None — обычная строка без размера;
+    # тогда и при сохранении размер не дописывается.
+    crop_size: Optional[Tuple[int, int]] = None

@@ -32,6 +32,7 @@ def _fake_pipeline_run(n_files=3, sleep_s=0.0, n_errors=0):
         on_error=None,
         should_cancel=None,
         pdf_ocr_fallback=True,
+        append_crop_size=False,
     ):
         if on_found:
             on_found(n_files)
@@ -67,6 +68,7 @@ def _fake_vlm_run(n_files=2):
         on_error=None,
         should_cancel=None,
         pdf_ocr_fallback=True,
+        append_crop_size=False,
     ):
         if on_found:
             on_found(n_files)
@@ -118,6 +120,30 @@ def test_start_job_vlm_mode_reports_counts_through_shared_tracker(monkeypatch, t
     assert job.docs_found == 2
     assert job.good_count == 2
     assert jobs.get_active_job_id() is None
+
+
+@pytest.mark.parametrize("mode", ["consensus", "vlm"])
+def test_start_job_passes_append_crop_size_to_pipeline(monkeypatch, tmp_path, mode):
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs)
+        return 0, 0
+
+    monkeypatch.setattr(jobs.pipeline, "run", fake_run)
+    monkeypatch.setattr(jobs.pipeline_vlm, "run", fake_run)
+
+    job_id = jobs.start_job(
+        str(tmp_path),
+        str(tmp_path / "out"),
+        0.9,
+        mode=mode,
+        vlm_engines=["dots_ocr"],
+        append_crop_size=True,
+    )
+    _wait_until_finished(job_id)
+
+    assert seen["append_crop_size"] is True
 
 
 def test_start_job_rejects_concurrent_run(monkeypatch, tmp_path):

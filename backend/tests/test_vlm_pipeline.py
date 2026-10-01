@@ -111,6 +111,19 @@ def test_writes_good_line_in_crop_tab_text_format(monkeypatch, one_png, tmp_path
     assert lines == ["crops/0/image_00001.webp\tПРИВЕТ МИР"]
 
 
+def test_append_crop_size_matches_saved_crop(monkeypatch, one_png, tmp_path):
+    monkeypatch.setattr(pipeline_vlm.vlm_client, "chat", lambda *a, **k: _ANSWER)
+    out = tmp_path / "out"
+
+    _run(one_png, out, append_crop_size=True)
+
+    line = (out / "good.txt").read_text(encoding="utf-8").rstrip("\n")
+    crop_rel, text, width, height = line.split("\t")
+    assert text == "ПРИВЕТ МИР"
+    with Image.open(out / crop_rel) as saved:
+        assert saved.size == (int(width), int(height))
+
+
 def test_writes_one_debug_record_per_line(monkeypatch, one_png, tmp_path):
     monkeypatch.setattr(pipeline_vlm.vlm_client, "chat", lambda *a, **k: _ANSWER)
     _no_save(monkeypatch)

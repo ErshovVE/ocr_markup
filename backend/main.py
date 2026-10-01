@@ -118,6 +118,9 @@ class RunRequest(BaseModel):
     # False — страницы PDF без годного текстового слоя пропускаются вместо
     # OCR-консенсуса (режим «только текстовый слой»: без медленного OCR на CPU).
     pdf_ocr_fallback: bool = True
+    # True — в конец каждой строки good.txt/needs_review.txt через табуляцию
+    # дописываются ширина и высота кропа в пикселях (оба режима).
+    append_crop_size: bool = False
     # Движок детекции строк текста — независим от preferred_model.
     detector_engine: Literal["paddle", "surya", "tesseract"] = DEFAULT_DETECTOR_ENGINE
     # Какие движки распознавания прогонять на строку; min_agree — сколько из
@@ -237,6 +240,7 @@ def run(req: RunRequest):
             req.vlm_min_agree,
             req.iou_threshold,
             pdf_ocr_fallback=req.pdf_ocr_fallback,
+            append_crop_size=req.append_crop_size,
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e

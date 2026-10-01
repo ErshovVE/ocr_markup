@@ -122,6 +122,7 @@ STRINGS = {
         "engines_multiselect_label": "Движки распознавания (выберите {count})",
         "preferred_model_label": "Предпочитаемая модель (тай-брейк при разногласии)",
         "extract_pdf_label": "Извлекать текст из PDF напрямую, без OCR (если есть текстовый слой)",
+        "append_crop_size_label": "Дописывать в строку датасета ширину и высоту кропа (px)",
         "run_btn": "▶ Запустить",
         "choose_exact_engines_error": "Выберите ровно {count} движков распознавания для этой схемы",
         "run_started": "Запущено",
@@ -276,6 +277,7 @@ STRINGS = {
         "preferred_model_label": "Preferred model (tie-break on disagreement)",
         "extract_pdf_label": "Extract text from PDF directly, skipping OCR "
         "(if a text layer exists)",
+        "append_crop_size_label": "Append crop width and height (px) to each dataset line",
         "run_btn": "▶ Run",
         "choose_exact_engines_error": "Choose exactly {count} recognition engines for this scheme",
         "run_started": "Started",

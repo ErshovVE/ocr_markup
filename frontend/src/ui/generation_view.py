@@ -250,6 +250,8 @@ def _render_vlm_run_form(input_dir: str, output_dir: str):
         t("iou_threshold_label"), 0.1, 0.9, 0.5, 0.05, key="vlm_iou_threshold"
     )
 
+    append_crop_size = st.checkbox(t("append_crop_size_label"), value=False, key="vlm_crop_size")
+
     if st.button(t("run_btn"), key="vlm_run"):
         if not selected:
             st.error(t("choose_vlm_models_error"))
@@ -262,6 +264,7 @@ def _render_vlm_run_form(input_dir: str, output_dir: str):
                     "vlm_engines": selected,
                     "vlm_min_agree": vlm_min_agree,
                     "iou_threshold": iou_threshold,
+                    "append_crop_size": append_crop_size,
                 }
             )
 
@@ -354,6 +357,10 @@ def _render_classic_run_form(input_dir: str, output_dir: str):
         key="consensus_extract_pdf",
     )
 
+    append_crop_size = st.checkbox(
+        t("append_crop_size_label"), value=False, key="consensus_crop_size"
+    )
+
     if st.button(t("run_btn"), key="consensus_run"):
         if len(engines) != engines_count:
             st.error(t("choose_exact_engines_error", count=engines_count))
@@ -369,6 +376,7 @@ def _render_classic_run_form(input_dir: str, output_dir: str):
                     "detector_engine": detector_engine,
                     "engines": engines,
                     "min_agree": min_agree,
+                    "append_crop_size": append_crop_size,
                 }
             )
 
