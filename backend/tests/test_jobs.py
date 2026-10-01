@@ -33,6 +33,8 @@ def _fake_pipeline_run(n_files=3, sleep_s=0.0, n_errors=0):
         should_cancel=None,
         pdf_ocr_fallback=True,
         append_crop_size=False,
+        normalize_labels=False,
+        alphabet=None,
     ):
         if on_found:
             on_found(n_files)
@@ -69,6 +71,8 @@ def _fake_vlm_run(n_files=2):
         should_cancel=None,
         pdf_ocr_fallback=True,
         append_crop_size=False,
+        normalize_labels=False,
+        alphabet=None,
     ):
         if on_found:
             on_found(n_files)
@@ -140,10 +144,14 @@ def test_start_job_passes_append_crop_size_to_pipeline(monkeypatch, tmp_path, mo
         mode=mode,
         vlm_engines=["dots_ocr"],
         append_crop_size=True,
+        normalize_labels=True,
+        alphabet=frozenset("аб "),
     )
     _wait_until_finished(job_id)
 
     assert seen["append_crop_size"] is True
+    assert seen["normalize_labels"] is True
+    assert seen["alphabet"] == frozenset("аб ")
 
 
 def test_start_job_rejects_concurrent_run(monkeypatch, tmp_path):

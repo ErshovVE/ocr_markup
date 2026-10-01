@@ -32,7 +32,7 @@ CPU без GPU). Постраничный опрос всех моделей п�
 import json
 import logging
 import os
-from typing import Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pypdfium2 as pdfium
@@ -48,6 +48,7 @@ from backend.config import (
 from backend.pipeline import (
     _crop_paths,
     _dataset_line,
+    _finalize_line,
     _is_big_enough,
     _resume_img_count,
     _save_crop,
@@ -220,7 +221,7 @@ def _write_page(
     page_lines: PageLines,
     vlm_min_agree: int,
     iou_threshold: float,
-    write_line: Callable[[str, str, str, np.ndarray], None],
+    write_line: Callable[[str, str, str, np.ndarray], str],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]],
     on_error: Optional[Callable[[str], None]],
@@ -243,7 +244,7 @@ def _write_page(
 
             crop_relative, crop_absolute = allocate_crop_path()
             _save_crop(crop, crop_absolute)
-            write_line(bucket, crop_relative, text, crop)
+            bucket = write_line(bucket, crop_relative, text, crop)
             if on_line_done:
                 on_line_done(bucket, diverged)
             if write_debug:
@@ -346,6 +347,8 @@ def run(
     on_error: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     append_crop_size: bool = False,
+    normalize_labels: bool = False,
+    alphabet: Optional[FrozenSet[str]] = None,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов через одну или несколько VLM.
 
@@ -353,7 +356,8 @@ def run(
     сколько движков должны отдать совпадающий по IoU бокс с одинаковым текстом
     для "good"; iou_threshold — порог сопоставления боксов разных движков.
     append_crop_size — дописывать в строку датасета ширину/высоту кропа
-    (см. backend.pipeline._dataset_line).
+    (см. backend.pipeline._dataset_line); normalize_labels / alphabet — см.
+    backend.pipeline._finalize_line.
 
     Обход «модель за моделью» (см. докстринг модуля): все модели, кроме
     последней, проходят папку и копят строки; последняя проходит её, сводит
@@ -391,8 +395,9 @@ def run(
         open(os.path.join(output_dir, "debug.jsonl"), "w", encoding="utf-8") as debug_file,
     ):
 
-        def write_line(bucket: str, crop_relative: str, text: str, crop: np.ndarray) -> None:
+        def write_line(bucket: str, crop_relative: str, text: str, crop: np.ndarray) -> str:
             nonlocal good_count, review_count
+            bucket, text = _finalize_line(bucket, text, normalize_labels, alphabet)
             target = good_file if bucket == "good" else review_file
             target.write(_dataset_line(crop_relative, text, crop, append_crop_size))
             target.flush()
@@ -400,6 +405,7 @@ def run(
                 good_count += 1
             else:
                 review_count += 1
+            return bucket
 
         def write_debug(record: dict) -> None:
             debug_file.write(json.dumps(record, ensure_ascii=False) + "\n")

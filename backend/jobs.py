@@ -15,7 +15,7 @@ import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Literal, Optional
+from typing import Deque, Dict, FrozenSet, List, Literal, Optional
 
 from backend import pipeline, pipeline_vlm
 from backend.config import (
@@ -139,6 +139,8 @@ def _run_job(
     iou_threshold: float = DEFAULT_IOU_THRESHOLD,
     pdf_ocr_fallback: bool = True,
     append_crop_size: bool = False,
+    normalize_labels: bool = False,
+    alphabet: Optional[FrozenSet[str]] = None,
 ):
     global _active_job_id
     state = _jobs[job_id]
@@ -179,6 +181,8 @@ def _run_job(
                 on_error=on_error,
                 should_cancel=should_cancel,
                 append_crop_size=append_crop_size,
+                normalize_labels=normalize_labels,
+                alphabet=alphabet,
             )
         else:
             good_count, needs_review_count = pipeline.run(
@@ -199,6 +203,8 @@ def _run_job(
                 should_cancel=should_cancel,
                 pdf_ocr_fallback=pdf_ocr_fallback,
                 append_crop_size=append_crop_size,
+                normalize_labels=normalize_labels,
+                alphabet=alphabet,
             )
         final_status = "cancelled" if state.cancel_event.is_set() else "done"
         state.result = {
@@ -238,6 +244,8 @@ def start_job(
     iou_threshold: float = DEFAULT_IOU_THRESHOLD,
     pdf_ocr_fallback: bool = True,
     append_crop_size: bool = False,
+    normalize_labels: bool = False,
+    alphabet: Optional[FrozenSet[str]] = None,
 ) -> str:
     """Запускает pipeline.run / pipeline_vlm.run в фоновом потоке и сразу
     возвращает job_id.
@@ -278,6 +286,8 @@ def start_job(
             iou_threshold,
             pdf_ocr_fallback,
             append_crop_size,
+            normalize_labels,
+            alphabet,
         ),
         daemon=True,
     )

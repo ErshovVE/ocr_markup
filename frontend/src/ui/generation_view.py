@@ -251,6 +251,7 @@ def _render_vlm_run_form(input_dir: str, output_dir: str):
     )
 
     append_crop_size = st.checkbox(t("append_crop_size_label"), value=False, key="vlm_crop_size")
+    normalize_labels, alphabet_file = _render_label_options("vlm")
 
     if st.button(t("run_btn"), key="vlm_run"):
         if not selected:
@@ -265,8 +266,24 @@ def _render_vlm_run_form(input_dir: str, output_dir: str):
                     "vlm_min_agree": vlm_min_agree,
                     "iou_threshold": iou_threshold,
                     "append_crop_size": append_crop_size,
+                    "normalize_labels": normalize_labels,
+                    "alphabet_file": alphabet_file,
                 }
             )
+
+
+def _render_label_options(prefix: str):
+    """Нормализация меток и словарь модели — общие для обоих режимов.
+    Пустой путь словаря -> None (без проверки)."""
+    normalize_labels = st.checkbox(
+        t("normalize_labels_label"), value=False, key=f"{prefix}_normalize_labels"
+    )
+    alphabet_file = st.text_input(
+        t("alphabet_file_label"),
+        key=f"{prefix}_alphabet_file",
+        placeholder=t("alphabet_file_placeholder"),
+    ).strip()
+    return normalize_labels, alphabet_file or None
 
 
 def _render_run_controls():
@@ -360,6 +377,7 @@ def _render_classic_run_form(input_dir: str, output_dir: str):
     append_crop_size = st.checkbox(
         t("append_crop_size_label"), value=False, key="consensus_crop_size"
     )
+    normalize_labels, alphabet_file = _render_label_options("consensus")
 
     if st.button(t("run_btn"), key="consensus_run"):
         if len(engines) != engines_count:
@@ -377,6 +395,8 @@ def _render_classic_run_form(input_dir: str, output_dir: str):
                     "engines": engines,
                     "min_agree": min_agree,
                     "append_crop_size": append_crop_size,
+                    "normalize_labels": normalize_labels,
+                    "alphabet_file": alphabet_file,
                 }
             )
 

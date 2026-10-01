@@ -17,6 +17,7 @@ from backend.config import (
 )
 from backend.detector import DEFAULT_DETECTOR_ENGINE, DETECTOR_ENGINES
 from backend.jobs import cancel_job, get_active_job_id, get_job, get_status_snapshot, start_job
+from backend.labels import load_alphabet
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE, LATIN_MODEL_SIZES
 
 # Литералы в RunRequest дублируют эти кортежи ради OpenAPI-схемы — ловим дрейф.
@@ -121,6 +122,12 @@ class RunRequest(BaseModel):
     # True — в конец каждой строки good.txt/needs_review.txt через табуляцию
     # дописываются ширина и высота кропа в пикселях (оба режима).
     append_crop_size: bool = False
+    # True — в метке типографские варианты символов заменяются на символы
+    # словаря (– -> —, „ ” “ -> ", ‘ ’ -> '), картинка не меняется (backend/labels.py).
+    normalize_labels: bool = False
+    # Словарь модели (по символу на строку): строки good с символами вне него
+    # уходят в needs_review. None — без проверки.
+    alphabet_file: Optional[str] = None
     # Движок детекции строк текста — независим от preferred_model.
     detector_engine: Literal["paddle", "surya", "tesseract"] = DEFAULT_DETECTOR_ENGINE
     # Какие движки распознавания прогонять на строку; min_agree — сколько из
@@ -214,6 +221,15 @@ def run(req: RunRequest):
     _reject_outside_data_root(req.output_dir, "output_dir")
     if not os.path.isdir(req.input_dir):
         raise HTTPException(400, f"input_dir не найдена: {req.input_dir}")
+    alphabet = None
+    if req.alphabet_file:
+        _reject_outside_data_root(req.alphabet_file, "alphabet_file")
+        if not os.path.isfile(req.alphabet_file):
+            raise HTTPException(400, f"alphabet_file не найден: {req.alphabet_file}")
+        try:
+            alphabet = load_alphabet(req.alphabet_file)
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            raise HTTPException(400, f"alphabet_file не читается: {e}") from e
     try:
         os.makedirs(req.output_dir, exist_ok=True)
     except OSError as e:
@@ -241,6 +257,8 @@ def run(req: RunRequest):
             req.iou_threshold,
             pdf_ocr_fallback=req.pdf_ocr_fallback,
             append_crop_size=req.append_crop_size,
+            normalize_labels=req.normalize_labels,
+            alphabet=alphabet,
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e

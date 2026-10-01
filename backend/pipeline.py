@@ -4,7 +4,7 @@ import os
 import re
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
 import pypdfium2 as pdfium
@@ -24,6 +24,7 @@ from backend.config import (
 )
 from backend.consensus import vote
 from backend.detector import DEFAULT_DETECTOR_ENGINE, Detector
+from backend.labels import normalize_label, out_of_alphabet
 from backend.recognizers import (
     DEFAULT_LATIN_MODEL_SIZE,
     EMPTY_RESULT,
@@ -309,6 +310,21 @@ def _dataset_line(crop_relative: str, text: str, crop: np.ndarray, append_crop_s
     return f"{crop_relative}\t{text}\n"
 
 
+def _finalize_line(
+    bucket: str, text: str, normalize_labels: bool, alphabet: Optional[FrozenSet[str]]
+) -> Tuple[str, str]:
+    """Итоговые (корзина, текст) строки датасета: normalize_labels — типографские
+    варианты символов -> символы словаря (backend/labels.py); alphabet — строка
+    "good" с символами вне словаря модели уходит в needs_review (метка из чужого
+    текстового слоя/OCR с мусором не попадает в обучение без проверки).
+    Общая для классического и VLM-пути."""
+    if normalize_labels:
+        text = normalize_label(text)
+    if alphabet is not None and bucket == "good" and out_of_alphabet(text, alphabet):
+        bucket = "needs_review"
+    return bucket, text
+
+
 def list_input_files(input_dir: str) -> Tuple[List[str], List[str]]:
     """Входные документы папки (без рекурсии): (картинки, PDF), каждый список
     отсортирован по имени.
@@ -342,7 +358,7 @@ def _process_boxes(
     latin_model_size: str,
     tesseract_lang: str,
     source_label: str,
-    write_line: Callable[[str, str, str, np.ndarray], None],
+    write_line: Callable[[str, str, str, np.ndarray], str],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]] = None,
     on_error: Optional[Callable[[str], None]] = None,
@@ -432,7 +448,7 @@ def _write_voted_line(
     min_agree: int,
     detector_engine: str,
     source_label: str,
-    write_line: Callable[[str, str, str, np.ndarray], None],
+    write_line: Callable[[str, str, str, np.ndarray], str],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]],
     on_error: Optional[Callable[[str], None]],
@@ -457,7 +473,7 @@ def _write_voted_line(
 
         crop_relative, crop_absolute = allocate_crop_path()
         _save_crop(img_crop, crop_absolute)
-        write_line(bucket, crop_relative, text, img_crop)
+        bucket = write_line(bucket, crop_relative, text, img_crop)
         if on_line_done:
             on_line_done(bucket, diverged)
         if write_debug:
@@ -488,7 +504,7 @@ def _process_pdf(
     latin_model_size: str,
     tesseract_lang: str,
     extract_pdf_text_layer: bool,
-    write_line: Callable[[str, str, str, np.ndarray], None],
+    write_line: Callable[[str, str, str, np.ndarray], str],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]] = None,
     on_error: Optional[Callable[[str], None]] = None,
@@ -582,7 +598,7 @@ def _process_pdf_page(
     lang: str,
     latin_model_size: str,
     tesseract_lang: str,
-    write_line: Callable[[str, str, str, np.ndarray], None],
+    write_line: Callable[[str, str, str, np.ndarray], str],
     allocate_crop_path: Callable[[], Tuple[str, str]],
     on_line_done: Optional[Callable[[str, bool], None]],
     on_error: Optional[Callable[[str], None]],
@@ -621,9 +637,9 @@ def _process_pdf_page(
                     continue
                 crop_relative, crop_absolute = allocate_crop_path()
                 _save_crop(img_crop, crop_absolute)
-                write_line("good", crop_relative, text, img_crop)
+                bucket = write_line("good", crop_relative, text, img_crop)
                 if on_line_done:
-                    on_line_done("good", False)
+                    on_line_done(bucket, False)
             except Exception as e:
                 msg = f"Ошибка сохранения строки в {source_label}: {e}"
                 logger.warning(msg)
@@ -671,6 +687,8 @@ def run(
     should_cancel: Optional[Callable[[], bool]] = None,
     pdf_ocr_fallback: bool = True,
     append_crop_size: bool = False,
+    normalize_labels: bool = False,
+    alphabet: Optional[FrozenSet[str]] = None,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов (изображения + PDF): детекция ->
     распознавание выбранными движками -> голосование; для PDF с текстовым
@@ -679,6 +697,8 @@ def run(
     распознаются (изображения из input_dir по-прежнему идут через OCR).
     append_crop_size=True — в конец каждой строки датасета через табуляцию
     дописываются ширина и высота кропа в пикселях (см. _dataset_line).
+    normalize_labels / alphabet — нормализация метки и отправка строк с
+    символами вне словаря в needs_review (см. _finalize_line).
 
     engines/min_agree — схема выбора движков распознавания ("1 из 1"/
     "1 из 2"/"2 из 2"/"2 из 3", см. RunRequest в backend/main.py и
@@ -743,8 +763,10 @@ def run(
         open(os.path.join(output_dir, "debug.jsonl"), "w", encoding="utf-8") as debug_file,
     ):
 
-        def write_line(bucket: str, crop_relative: str, text: str, crop: np.ndarray) -> None:
+        def write_line(bucket: str, crop_relative: str, text: str, crop: np.ndarray) -> str:
+            """Пишет строку; возвращает итоговую корзину (alphabet может сменить её)."""
             nonlocal good_count, review_count
+            bucket, text = _finalize_line(bucket, text, normalize_labels, alphabet)
             target = good_file if bucket == "good" else review_file
             target.write(_dataset_line(crop_relative, text, crop, append_crop_size))
             target.flush()
@@ -752,6 +774,7 @@ def run(
                 good_count += 1
             else:
                 review_count += 1
+            return bucket
 
         def write_debug(record: dict) -> None:
             debug_file.write(json.dumps(record, ensure_ascii=False) + "\n")

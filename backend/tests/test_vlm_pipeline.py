@@ -507,3 +507,20 @@ def test_paddleocr_vl_upscale_is_capped_in_one_lanczos_resize(monkeypatch, tmp_p
     _run(tmp_path, tmp_path / "out", vlm_engines=["paddleocr_vl"])
 
     assert shapes == [(1463, VLM_MAX_IMAGE_SIDE, 3)]
+
+
+def test_normalize_labels_and_alphabet_route_lines(monkeypatch, one_png, tmp_path):
+    _no_save(monkeypatch)
+    answer = "\n".join([_hunyuan("„ПРИВЕТ”", 10, 10, 180, 45), _hunyuan("МИР£", 10, 100, 180, 135)])
+    monkeypatch.setattr(pipeline_vlm.vlm_client, "chat", lambda *a, **k: answer)
+    out = tmp_path / "out"
+    alphabet = frozenset('ПРИВЕТМ"')
+
+    events, good, review = _run(one_png, out, normalize_labels=True, alphabet=alphabet)
+
+    good_lines = (out / "good.txt").read_text(encoding="utf-8").splitlines()
+    review_lines = (out / "needs_review.txt").read_text(encoding="utf-8").splitlines()
+    assert [line.split("\t")[1] for line in good_lines] == ['"ПРИВЕТ"']
+    assert [line.split("\t")[1] for line in review_lines] == ["МИР£"]
+    assert (good, review) == (1, 1)
+    assert sorted(bucket for bucket, _ in events["lines"]) == ["good", "needs_review"]

@@ -142,3 +142,52 @@ def test_data_root_guard_rejects_paths_outside_root(tmp_path, monkeypatch):
     # вернуть модуль в исходное состояние для остальных тестов
     monkeypatch.delenv("OCR_DATA_ROOT", raising=False)
     importlib.reload(main)
+
+
+def _capture_start_job(monkeypatch):
+    seen = {}
+
+    def fake_start_job(*a, **k):
+        seen.update(k)
+        return "job-1"
+
+    monkeypatch.setattr(main, "start_job", fake_start_job)
+    return seen
+
+
+def test_run_passes_normalize_labels_and_loaded_alphabet(client, input_dir, tmp_path, monkeypatch):
+    seen = _capture_start_job(monkeypatch)
+    alphabet = tmp_path / "dict.txt"
+    alphabet.write_text("а\nб\n", encoding="utf-8")
+    payload = {
+        "input_dir": input_dir,
+        "output_dir": str(tmp_path / "o"),
+        "normalize_labels": True,
+        "alphabet_file": str(alphabet),
+    }
+    assert client.post("/run", json=payload).status_code == 200
+    assert seen["normalize_labels"] is True
+    assert seen["alphabet"] == frozenset("аб ")
+
+
+def test_run_without_alphabet_passes_none(client, input_dir, tmp_path, monkeypatch):
+    seen = _capture_start_job(monkeypatch)
+    payload = {"input_dir": input_dir, "output_dir": str(tmp_path / "o")}
+    assert client.post("/run", json=payload).status_code == 200
+    assert seen["normalize_labels"] is False and seen["alphabet"] is None
+
+
+@pytest.mark.parametrize("content", [None, "аб\n"])
+def test_run_rejects_missing_or_bad_alphabet(client, input_dir, tmp_path, monkeypatch, content):
+    _capture_start_job(monkeypatch)
+    alphabet = tmp_path / "dict.txt"
+    if content is not None:
+        alphabet.write_text(content, encoding="utf-8")
+    payload = {
+        "input_dir": input_dir,
+        "output_dir": str(tmp_path / "o"),
+        "alphabet_file": str(alphabet),
+    }
+    response = client.post("/run", json=payload)
+    assert response.status_code == 400
+    assert "alphabet_file" in response.json()["detail"]
