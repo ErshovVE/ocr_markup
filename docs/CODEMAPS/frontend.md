@@ -33,8 +33,10 @@ src/image_ops.py (75) — load_and_resize_image (@st.cache_data), rotate_image (
 src/hotkeys.py (54) — JS hotkeys matched to literal ←/→ button text · src/i18n.py (366) — STRINGS RU/EN, t()
 src/ui/generation_view.py (574) — see tree above · wrapper.py — PyInstaller entry
 
-## Not exposed in the UI yet
-`degrade_*` options of POST /run (page degradation) — API only.
+## Deliberately not in the UI
+`degrade_*` options of POST /run (page degradation) — API/CLI only by design: the UI is for labeling real documents
+via OCR/VLM, while degradation is batch dataset production for clean-label sources (synthetic, born-digital PDFs),
+driven by scripts or doc-generator's balancer; degraded crops in manual review would also invite "fixing" correct labels.
 
 ## State
 Only `st.session_state`: manager, current_idx, current_page, page_size, filter_option, unsaved_changes,
