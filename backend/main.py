@@ -1,6 +1,6 @@
 import os
 from contextlib import asynccontextmanager
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
@@ -15,6 +15,7 @@ from backend.config import (
     RECOGNITION_ENGINES,
     VLM_ENGINES,
 )
+from backend.degrade import DEFAULT_MIN_CONTRAST, DegradeOptions, effects_errors
 from backend.detector import DEFAULT_DETECTOR_ENGINE, DETECTOR_ENGINES
 from backend.jobs import cancel_job, get_active_job_id, get_job, get_status_snapshot, start_job
 from backend.labels import load_alphabet
@@ -142,6 +143,26 @@ class RunRequest(BaseModel):
     vlm_engines: List[str] = Field(default_factory=list)
     vlm_min_agree: int = Field(DEFAULT_VLM_MIN_AGREE, ge=1)
     iou_threshold: float = Field(DEFAULT_IOU_THRESHOLD, gt=0.0, le=1.0)
+    # Порча страниц PDF с текстовым слоем (backend/degrade.py): доля испорченных страниц
+    # (0 — выключено), сид, порог читаемости строки, набор эффектов {ink, paper, post}
+    # (None — набор по умолчанию). Только mode="consensus" и extract_pdf_text_layer=true:
+    # на OCR-страницах метку дают распознаватели, порча перед ними только испортит разметку.
+    degrade_page_share: float = Field(0.0, ge=0.0, le=1.0)
+    degrade_seed: int = 0
+    degrade_min_contrast: float = Field(DEFAULT_MIN_CONTRAST, ge=0.0)
+    degrade_effects: Optional[Dict[str, List[Dict[str, Any]]]] = None
+
+    def degrade_options(self) -> Optional[DegradeOptions]:
+        if self.degrade_page_share <= 0:
+            return None
+        options = DegradeOptions(
+            page_share=self.degrade_page_share,
+            seed=self.degrade_seed,
+            min_contrast=self.degrade_min_contrast,
+        )
+        if self.degrade_effects is not None:
+            options.effects = self.degrade_effects
+        return options
 
     @model_validator(mode="after")
     def _check_cross_fields(self) -> "RunRequest":
@@ -149,6 +170,15 @@ class RunRequest(BaseModel):
             raise ValueError(
                 "pdf_ocr_fallback=false без extract_pdf_text_layer пропустил бы все страницы PDF"
             )
+        if self.degrade_page_share > 0:
+            if self.mode == "vlm" or not self.extract_pdf_text_layer:
+                raise ValueError(
+                    "degrade_page_share > 0 работает только с текстовым слоем PDF "
+                    "(mode=consensus, extract_pdf_text_layer=true)"
+                )
+            errors = effects_errors(self.degrade_options().effects)
+            if errors:
+                raise ValueError("degrade_effects: " + "; ".join(errors))
         if self.mode == "vlm":
             bad = [e for e in self.vlm_engines if e not in VLM_ENGINES]
             if not self.vlm_engines or bad:
@@ -259,6 +289,7 @@ def run(req: RunRequest):
             append_crop_size=req.append_crop_size,
             normalize_labels=req.normalize_labels,
             alphabet=alphabet,
+            degrade=req.degrade_options(),
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e

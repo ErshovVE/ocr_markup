@@ -219,3 +219,4 @@ predict.py
 # Нативный запуск VLM (scripts/vlm/setup.*): GGUF-модели и сгенерированный preset
 .vlm/
 .env.vlm
+augraphy_cache/

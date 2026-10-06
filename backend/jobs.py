@@ -24,6 +24,7 @@ from backend.config import (
     DEFAULT_MIN_AGREE,
     DEFAULT_VLM_MIN_AGREE,
 )
+from backend.degrade import DegradeOptions
 from backend.detector import DEFAULT_DETECTOR_ENGINE
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE
 
@@ -141,6 +142,7 @@ def _run_job(
     append_crop_size: bool = False,
     normalize_labels: bool = False,
     alphabet: Optional[FrozenSet[str]] = None,
+    degrade: Optional[DegradeOptions] = None,
 ):
     global _active_job_id
     state = _jobs[job_id]
@@ -205,6 +207,7 @@ def _run_job(
                 append_crop_size=append_crop_size,
                 normalize_labels=normalize_labels,
                 alphabet=alphabet,
+                degrade=degrade,
             )
         final_status = "cancelled" if state.cancel_event.is_set() else "done"
         state.result = {
@@ -246,6 +249,7 @@ def start_job(
     append_crop_size: bool = False,
     normalize_labels: bool = False,
     alphabet: Optional[FrozenSet[str]] = None,
+    degrade: Optional[DegradeOptions] = None,
 ) -> str:
     """Запускает pipeline.run / pipeline_vlm.run в фоновом потоке и сразу
     возвращает job_id.
@@ -254,6 +258,7 @@ def start_job(
     (engines/min_agree, схема "1 из 1"/"1 из 2"/"2 из 2"/"2 из 3"). mode="vlm" —
     полностраничный VLM-парсинг (vlm_engines/vlm_min_agree/iou_threshold, см.
     backend/pipeline_vlm.py). JobState/трекер общий для обоих путей.
+    degrade — порча страниц PDF с текстовым слоем (только consensus, см. backend/degrade.py).
 
     Поднимает RuntimeError, если уже выполняется другое задание — вызывающий
     код (main.py) должен превращать это в HTTP 409.
@@ -288,6 +293,7 @@ def start_job(
             append_crop_size,
             normalize_labels,
             alphabet,
+            degrade,
         ),
         daemon=True,
     )

@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import numpy as np
 import pypdfium2 as pdfium
 from PIL import Image
 
+from backend import degrade as page_degrade
 from backend import pdf_extract
 from backend.config import (
     CROP_FILENAME_DIGITS,
@@ -514,6 +516,8 @@ def _process_pdf(
     min_agree: int = DEFAULT_MIN_AGREE,
     detector_engine: str = "paddle",
     pdf_ocr_fallback: bool = True,
+    degrade: Optional[page_degrade.DegradeOptions] = None,
+    write_degrade: Optional[Callable[[dict], None]] = None,
 ) -> None:
     """Обрабатывает один PDF-файл постранично: каждая страница — либо прямым
     извлечением текстового слоя (без OCR), либо обычным OCR-консенсусом
@@ -527,6 +531,7 @@ def _process_pdf(
     write_line/on_line_done см. _process_boxes; при использовании текстового
     слоя строки считаются сразу good/не diverged (vote() не вызывается — текст
     берётся из PDF напрямую).
+    degrade/write_degrade — порча страниц с текстовым слоем, см. _process_pdf_page.
     """
     pdf_doc = pdfium.PdfDocument(file_path)
     try:
@@ -561,6 +566,13 @@ def _process_pdf(
                     engines,
                     min_agree,
                     detector_engine,
+                    degrade=degrade,
+                    degrade_rng=(
+                        page_degrade.page_seed(degrade, file_path, page_index)
+                        if degrade is not None and degrade.enabled
+                        else None
+                    ),
+                    write_degrade=write_degrade,
                 )
             finally:
                 # Явно закрываем per-page нативные буферы pdfium сразу, а не
@@ -569,6 +581,29 @@ def _process_pdf(
                 page.close()
     finally:
         pdf_doc.close()
+
+
+def _degraded_page(
+    image: np.ndarray,
+    degrade: Optional[page_degrade.DegradeOptions],
+    rng,
+    source_label: str,
+    on_error: Optional[Callable[[str], None]],
+) -> Optional[np.ndarray]:
+    """Испорченная копия страницы или None (порча выключена, страница не выпала или
+    Augraphy упала — тогда страница остаётся чистой, сбой виден в /status)."""
+    if degrade is None or not degrade.enabled or rng is None:
+        return None
+    try:
+        return page_degrade.maybe_degrade_page(image, degrade, rng)
+    except page_degrade.GeometryChangedError:
+        raise  # эффект сдвинул геометрию — ошибка набора эффектов, а не одной страницы
+    except Exception as e:  # noqa: BLE001 — внутренние сбои Augraphy/numba
+        msg = f"Порча страницы не удалась {source_label}, страница остаётся чистой: {e}"
+        logger.warning(msg)
+        if on_error:
+            on_error(msg)
+        return None
 
 
 def _page_uses_text_layer(
@@ -607,9 +642,18 @@ def _process_pdf_page(
     engines: List[str],
     min_agree: int,
     detector_engine: str,
+    degrade: Optional[page_degrade.DegradeOptions] = None,
+    degrade_rng=None,
+    write_degrade: Optional[Callable[[dict], None]] = None,
 ) -> None:
     """Обрабатывает одну страницу PDF (см. _process_pdf) — текстовый слой либо
-    OCR-консенсус растровой страницы."""
+    OCR-консенсус растровой страницы.
+
+    degrade (backend/degrade.py) — только для текстового слоя, где метка не зависит от
+    пикселей: доля page_share страниц портится (degrade_rng — генератор этой страницы),
+    строка берётся с испорченной страницы, если осталась читаемой, иначе с чистой.
+    write_degrade получает запись по каждой строке испорченной страницы (degrade.jsonl).
+    OCR-страницы не портятся: там метку дают сами распознаватели."""
     try:
         numpy_image = pdf_extract.render_page(page)
     except Exception as e:
@@ -620,6 +664,7 @@ def _process_pdf_page(
         return
 
     if use_text_layer:
+        noisy_image = _degraded_page(numpy_image, degrade, degrade_rng, source_label, on_error)
         try:
             image_height, image_width = numpy_image.shape[:2]
             boxes_text = pdf_extract.extract_page_text_boxes(page, image_width, image_height)
@@ -635,9 +680,21 @@ def _process_pdf_page(
                 img_crop = crop_by_polygon(numpy_image, box)
                 if not _is_big_enough(img_crop):
                     continue
+                degraded = None
+                if noisy_image is not None:
+                    noisy_crop = crop_by_polygon(noisy_image, box)
+                    degraded = page_degrade.choose_crop(img_crop, noisy_crop, degrade.min_contrast)
+                    if degraded:
+                        img_crop = noisy_crop
                 crop_relative, crop_absolute = allocate_crop_path()
                 _save_crop(img_crop, crop_absolute)
                 bucket = write_line("good", crop_relative, text, img_crop)
+                if noisy_image is not None and write_degrade:
+                    # degraded: true — испорченный кроп, false — нечитаемый после порчи (взят
+                    # чистый), null — эффекты строку не задели
+                    write_degrade(
+                        {"crop": crop_relative, "source": source_label, "degraded": degraded}
+                    )
                 if on_line_done:
                     on_line_done(bucket, False)
             except Exception as e:
@@ -689,6 +746,7 @@ def run(
     append_crop_size: bool = False,
     normalize_labels: bool = False,
     alphabet: Optional[FrozenSet[str]] = None,
+    degrade: Optional[page_degrade.DegradeOptions] = None,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов (изображения + PDF): детекция ->
     распознавание выбранными движками -> голосование; для PDF с текстовым
@@ -699,6 +757,9 @@ def run(
     дописываются ширина и высота кропа в пикселях (см. _dataset_line).
     normalize_labels / alphabet — нормализация метки и отправка строк с
     символами вне словаря в needs_review (см. _finalize_line).
+    degrade — порча страниц PDF с текстовым слоем (backend/degrade.py, см.
+    _process_pdf_page); при включённой порче в output_dir пишется degrade.jsonl
+    (по записи на строку испорченной страницы).
 
     engines/min_agree — схема выбора движков распознавания ("1 из 1"/
     "1 из 2"/"2 из 2"/"2 из 3", см. RunRequest в backend/main.py и
@@ -761,6 +822,7 @@ def run(
         open(os.path.join(output_dir, "good.txt"), "w", encoding="utf-8") as good_file,
         open(os.path.join(output_dir, "needs_review.txt"), "w", encoding="utf-8") as review_file,
         open(os.path.join(output_dir, "debug.jsonl"), "w", encoding="utf-8") as debug_file,
+        contextlib.ExitStack() as optional_files,
     ):
 
         def write_line(bucket: str, crop_relative: str, text: str, crop: np.ndarray) -> str:
@@ -779,6 +841,16 @@ def run(
         def write_debug(record: dict) -> None:
             debug_file.write(json.dumps(record, ensure_ascii=False) + "\n")
             debug_file.flush()
+
+        degrade_file = None
+        if degrade is not None and degrade.enabled:
+            degrade_file = optional_files.enter_context(
+                open(os.path.join(output_dir, "degrade.jsonl"), "w", encoding="utf-8")
+            )
+
+        def write_degrade(record: dict) -> None:
+            degrade_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            degrade_file.flush()
 
         def allocate_crop_path() -> Tuple[str, str]:
             nonlocal img_count
@@ -846,6 +918,8 @@ def run(
                     min_agree=min_agree,
                     detector_engine=detector_engine,
                     pdf_ocr_fallback=pdf_ocr_fallback,
+                    degrade=degrade,
+                    write_degrade=write_degrade if degrade_file is not None else None,
                 )
             except Exception as e:
                 msg = f"Ошибка обработки файла {file_path}: {e}"

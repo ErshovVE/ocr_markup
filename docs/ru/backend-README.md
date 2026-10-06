@@ -94,7 +94,7 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "pdf_ocr_fallback": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int, "append_crop_size": bool, "normalize_labels": bool, "alphabet_file": str | null}` → `{"job_id": str, "warnings": [str]}` (все три по умолчанию выключены, оба режима: `append_crop_size` — дописывать в каждую строку `good.txt`/`needs_review.txt` ширину и высоту кропа в пикселях — `crop\ttext\tw\th`; `normalize_labels` — в метке типографские варианты заменяются на символы словаря: среднее тире → длинное, `“ ” „ ‟` → `"`, `‘ ’ ‚ ‛` → `'`, картинка не меняется (`backend/labels.py`, общий с балансировщиком doc-generator); `alphabet_file` — словарь модели, по символу на строку: строка `good` с символами вне него уходит в `needs_review.txt`; 400, если файла нет, он не читается или лежит вне `OCR_DATA_ROOT`); 400, если `engines` пуст/содержит неизвестный движок или `min_agree` вне `[1, len(engines)]`; 409, если уже выполняется другое задание (одновременно поддерживается только одно, см. backend/jobs.py). `warnings` — движки из `engines` (и детектор), чья модель ещё не готова (`not_checked`/`checking`/`error` в `/models/status`) — задание всё равно стартует, предупреждение просто объясняет, почему первые строки могут "зависнуть" на скачивании весов
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "pdf_ocr_fallback": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int, "append_crop_size": bool, "normalize_labels": bool, "alphabet_file": str | null, "degrade_page_share": float (0..1), "degrade_seed": int, "degrade_min_contrast": float, "degrade_effects": {...} | null}` → `{"job_id": str, "warnings": [str]}` (все три по умолчанию выключены, оба режима: `append_crop_size` — дописывать в каждую строку `good.txt`/`needs_review.txt` ширину и высоту кропа в пикселях — `crop\ttext\tw\th`; `normalize_labels` — в метке типографские варианты заменяются на символы словаря: среднее тире → длинное, `“ ” „ ‟` → `"`, `‘ ’ ‚ ‛` → `'`, картинка не меняется (`backend/labels.py`, общий с балансировщиком doc-generator); `alphabet_file` — словарь модели, по символу на строку: строка `good` с символами вне него уходит в `needs_review.txt`; 400, если файла нет, он не читается или лежит вне `OCR_DATA_ROOT`); 400, если `engines` пуст/содержит неизвестный движок или `min_agree` вне `[1, len(engines)]`; 409, если уже выполняется другое задание (одновременно поддерживается только одно, см. backend/jobs.py). `warnings` — движки из `engines` (и детектор), чья модель ещё не готова (`not_checked`/`checking`/`error` в `/models/status`) — задание всё равно стартует, предупреждение просто объясняет, почему первые строки могут "зависнуть" на скачивании весов
 - `GET /jobs/active` → `{"job_id": str | null}` — id текущего выполняющегося задания (или null); нужен фронтенду, чтобы восстановить трекер прогресса после перезагрузки страницы
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — трекер прогресса обновляется построчно по ходу выполнения задания (см. backend/jobs.py), а не только по завершении файла целиком (распознавание одной строки Surya может занимать до ~20с); `diverged_count` — строки, где 2+ движка независимо уверены (score >= threshold), но разошлись в тексте (см. backend/consensus.py); `error_count`/`errors` — файлы/строки, упавшие с исключением или таймаутом движка (см. `ENGINE_CALL_TIMEOUT_SECONDS` ниже) — `error_count` растёт без ограничения, `errors` хранит только последние `MAX_STORED_ERRORS` (по умолчанию 50) сообщений
 - `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — неизвестный `job_id`, 409 — задание уже не выполняется. Отмена кооперативная: поток нельзя убить напрямую, поэтому задание останавливается на ближайшей проверке между файлами/страницами/строками, не теряя уже записанное; после остановки `/status` покажет `"status": "cancelled"`
@@ -195,6 +195,49 @@ width, height, rng=None)` возвращает те же рамки и текс�
 не использует — она для генераторов датасета вне этого репозитория
 (балансировщик строк doc-generator импортирует `backend/pdf_extract.py`
 напрямую), которым нужно знать, каким шрифтом напечатан каждый кроп.
+
+## Порча страниц с текстовым слоем (`degrade_*`)
+
+Синтетика и born-digital PDF рендерятся идеально чистыми, а реальные строки — со сканов. При
+`degrade_page_share > 0` такая доля страниц **с текстовым слоем** портится целиком до нарезки строк
+(`backend/degrade.py`, [Augraphy](https://github.com/sparkfish/augraphy), MIT): чернила (растекание,
+нехватка, пятнистость, letterpress), бумага (текстура, пятна) и эффекты после печати (ролики, свет и
+тень, просвечивание, шум, факс, гамма, JPEG). Пятна, тени и свет согласованы по странице, как на скане.
+
+- **Только текстовый слой.** Там метка берётся из PDF и от пикселей не зависит. OCR-страницы не
+  портятся (их метку дают сами распознаватели), поэтому `degrade_page_share > 0` с `mode="vlm"` или
+  `extract_pdf_text_layer=false` — 422.
+- **Геометрия не меняется**: только эффекты, не двигающие пиксели; эффект, изменивший размер страницы,
+  — `GeometryChangedError` (файл падает, ошибка видна в `/status`).
+- **Метка совпадает с картинкой**: каждая строка испорченной страницы сравнивается со своей чистой копией
+  (`legible()`: контраст текст/фон ≥ `degrade_min_contrast` — по умолчанию 25, у бледного текста —
+  половина исходного; по всей строке ≥ 70 % пикселей букв остались текстом и ≤ 8 % фона стало похожим
+  на текст, и то же в окнах шириной около буквы, так что одно стёртое или залитое слово отбраковывает
+  строку; светлый текст на тёмном поддерживается; крошечные кропы сравниваются попиксельно).
+  Нечитаемая строка берётся с **чистой** страницы — строки не теряются. На синтетике так возвращаются
+  10–15 % строк испорченных страниц.
+- `degrade.jsonl` (только при включённой порче): по записи на строку испорченной страницы —
+  `{"crop", "source", "degraded"}`, где `degraded` — `true` (испорченный кроп), `false` (нечитаема после
+  порчи, взят чистый) или `null` (эффекты строку не задели).
+- **Сиды**: генератор страницы — `(degrade_seed, имя файла, номер страницы)`, от порядка обработки не
+  зависит. Повтор не побайтный: у jit-функций numba свой генератор, а BleedThrough берёт «оборот» листа
+  из общего `augraphy_cache/` Augraphy (до 30 последних страниц в рабочей папке, в `.gitignore`).
+- **Эффекты** — `degrade_effects`: `{"ink": [...], "paper": [...], "post": [...]}`, эффект —
+  `{"name": <класс Augraphy>, "p": 0..1, "params": {...}}` или `{"one_of": [...], "p": ...}`; `null` —
+  `DEFAULT_EFFECTS` (заметны на строке ~48 px и стоят несколько секунд на страницу A4/A3 200 dpi;
+  InkShifter/Hollow слишком медленные, Markup/BadPhotoCopy падают внутри Augraphy). Набор собирается при
+  проверке запроса: опечатка — 422 до старта задания.
+- **Как библиотека**: `degrade.maybe_degrade_page(image, options, degrade.page_seed(...))`,
+  `degrade.choose_crop(clean, noisy, min_contrast)` — тот же слой использует балансировщик doc-generator.
+
+Предпросмотр целых страниц (WebP без потерь + `pages.jsonl`), например для документов doc-generator:
+
+```bash
+python -m backend.degrade --input <pdf|папка> --out <папка> --page-share 1 --seed 1 [--effects effects.json]
+```
+
+Страницы в WebP без потерь тяжёлые (1–7 МБ на испорченную страницу): это инструмент просмотра, сам
+датасет — кропы строк.
 
 ## VLM-режим (`mode="vlm"`)
 

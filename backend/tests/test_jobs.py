@@ -3,6 +3,7 @@ import time
 import pytest
 
 from backend import jobs
+from backend.degrade import DegradeOptions
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +36,7 @@ def _fake_pipeline_run(n_files=3, sleep_s=0.0, n_errors=0):
         append_crop_size=False,
         normalize_labels=False,
         alphabet=None,
+        degrade=None,
     ):
         if on_found:
             on_found(n_files)
@@ -152,6 +154,21 @@ def test_start_job_passes_append_crop_size_to_pipeline(monkeypatch, tmp_path, mo
     assert seen["append_crop_size"] is True
     assert seen["normalize_labels"] is True
     assert seen["alphabet"] == frozenset("аб ")
+
+
+def test_start_job_passes_degrade_to_consensus_pipeline(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs)
+        return 0, 0
+
+    monkeypatch.setattr(jobs.pipeline, "run", fake_run)
+    options = DegradeOptions(page_share=0.5, seed=3)
+
+    _wait_until_finished(jobs.start_job(str(tmp_path), str(tmp_path / "out"), 0.9, degrade=options))
+
+    assert seen["degrade"] is options
 
 
 def test_start_job_rejects_concurrent_run(monkeypatch, tmp_path):

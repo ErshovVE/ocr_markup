@@ -99,7 +99,7 @@ outside it. Docker Compose sets `OCR_DATA_ROOT=/data` and binds every port to
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float (0..1), "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "pdf_ocr_fallback": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int, "append_crop_size": bool, "normalize_labels": bool, "alphabet_file": str | null}` → `{"job_id": str, "warnings": [str]}` (all three default to off, both modes: `append_crop_size` appends the crop width and height in pixels to every `good.txt`/`needs_review.txt` line — `crop\ttext\tw\th`; `normalize_labels` maps typographic variants in the label to dictionary symbols — en dash → em dash, `“ ” „ ‟` → `"`, `‘ ’ ‚ ‛` → `'`, the image is unchanged (`backend/labels.py`, shared with the doc-generator balancer); `alphabet_file` — the model dictionary, one symbol per line: a `good` line with symbols outside it goes to `needs_review.txt`; 400 if the file is missing, unreadable or outside `OCR_DATA_ROOT`); **422** if a field is out of range or the cross-field checks fail (`engines` empty/unknown, `min_agree` outside `[1, len(engines)]`, `preferred_model` not in `engines`, `iou_threshold` outside `(0, 1]`, …); 400 if `input_dir` doesn't exist, `output_dir` isn't writable, or a path is outside `OCR_DATA_ROOT`; 409 if another job is already running (only one is supported at a time, see backend/jobs.py). `warnings` — engines from `engines` (and the detector) whose model isn't ready yet (`not_checked`/`checking`/`error` in `/models/status`); the job starts anyway. Readiness is checked **before** the job is spawned, so a slow check delays the response rather than detaching from it.
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float (0..1), "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "pdf_ocr_fallback": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int, "append_crop_size": bool, "normalize_labels": bool, "alphabet_file": str | null, "degrade_page_share": float (0..1), "degrade_seed": int, "degrade_min_contrast": float, "degrade_effects": {...} | null}` → `{"job_id": str, "warnings": [str]}` (all three default to off, both modes: `append_crop_size` appends the crop width and height in pixels to every `good.txt`/`needs_review.txt` line — `crop\ttext\tw\th`; `normalize_labels` maps typographic variants in the label to dictionary symbols — en dash → em dash, `“ ” „ ‟` → `"`, `‘ ’ ‚ ‛` → `'`, the image is unchanged (`backend/labels.py`, shared with the doc-generator balancer); `alphabet_file` — the model dictionary, one symbol per line: a `good` line with symbols outside it goes to `needs_review.txt`; 400 if the file is missing, unreadable or outside `OCR_DATA_ROOT`); **422** if a field is out of range or the cross-field checks fail (`engines` empty/unknown, `min_agree` outside `[1, len(engines)]`, `preferred_model` not in `engines`, `iou_threshold` outside `(0, 1]`, …); 400 if `input_dir` doesn't exist, `output_dir` isn't writable, or a path is outside `OCR_DATA_ROOT`; 409 if another job is already running (only one is supported at a time, see backend/jobs.py). `warnings` — engines from `engines` (and the detector) whose model isn't ready yet (`not_checked`/`checking`/`error` in `/models/status`); the job starts anyway. Readiness is checked **before** the job is spawned, so a slow check delays the response rather than detaching from it.
 - `GET /jobs/active` → `{"job_id": str | null}` — id of the currently running job (or null); needed by the frontend to restore the progress tracker after a page reload
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — the progress tracker updates line by line as the job runs (see backend/jobs.py), not only when a whole file completes (a single Surya line can take up to ~20s to recognize); `diverged_count` — lines where 2+ engines are independently confident (score >= threshold) but disagreed on the text (see backend/consensus.py); `error_count`/`errors` — files/lines that failed with an exception or an engine timeout (see `ENGINE_CALL_TIMEOUT_SECONDS` below) — `error_count` grows unbounded, `errors` holds only the last `MAX_STORED_ERRORS` (default 50) messages
 - `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — unknown `job_id`, 409 — the job is no longer running. Cancellation is cooperative: the thread can't be killed directly, so the job stops at the nearest check between files/pages/lines, without losing what's already written; once stopped, `/status` will show `"status": "cancelled"`
@@ -205,6 +205,52 @@ whole line's. Bold is read from the font name (`Bold`/`Black`/`Heavy`/
 it's for dataset generators outside this repo (doc-generator's line balancer
 imports `backend/pdf_extract.py` directly) that need to know which font each
 crop was printed in.
+
+## Scan/print degradation of text-layer pages (`degrade_*`)
+
+Synthetic and born-digital PDFs render perfectly clean, real lines come from scans.
+With `degrade_page_share > 0` that share of **text-layer** pages is degraded as a whole
+before lines are cropped (`backend/degrade.py`, [Augraphy](https://github.com/sparkfish/augraphy),
+MIT): ink (bleed, low ink, mottling, letterpress), paper (texture, stains) and post-print
+effects (rollers, lighting/shadow, bleed-through, noise, fax, gamma, JPEG). Stains, shadows
+and light are consistent across the page, like a real scan.
+
+- **Text layer only.** There the label comes from the PDF and does not depend on pixels.
+  OCR pages are never degraded (their label *is* the recognisers' reading), so
+  `degrade_page_share > 0` with `mode="vlm"` or `extract_pdf_text_layer=false` is a 422.
+- **Geometry is untouched**: only effects that don't move pixels; one that changes the page
+  size raises `GeometryChangedError` (the file fails, visible in `/status`).
+- **Labels match pixels**: every line of a degraded page is compared with its clean copy
+  (`legible()`: text/background contrast ≥ `degrade_min_contrast` — default 25, or half the
+  clean contrast for pale text; ≥ 70 % of glyph pixels stay text and ≤ 8 % of background turns
+  text-like over the whole line, and the same in letter-wide windows, so one erased or blotted
+  word fails the line; light-on-dark text supported; tiny crops compared pixelwise). An
+  unreadable line keeps the **clean** crop — no line is lost. On synthetic pages 10–15 % of the
+  lines of degraded pages fall back to clean.
+- `degrade.jsonl` (written only when enabled): one record per line of a degraded page —
+  `{"crop", "source", "degraded"}`, where `degraded` is `true` (degraded crop), `false`
+  (unreadable after degradation, clean crop used) or `null` (no effect touched the line).
+- **Seeds**: a page's generator is `(degrade_seed, file name, page number)`, independent of
+  processing order. Not byte-exact: numba-jitted effects use their own RNG, and BleedThrough
+  takes the "back side" from Augraphy's shared `augraphy_cache/` (up to 30 recent pages in the
+  working directory, gitignored).
+- **Effects** — `degrade_effects`: `{"ink": [...], "paper": [...], "post": [...]}`, each effect
+  `{"name": <Augraphy class>, "p": 0..1, "params": {...}}` or `{"one_of": [...], "p": ...}`;
+  `null` uses `DEFAULT_EFFECTS` (tuned to be visible on ~48 px lines and to cost a few seconds
+  per A4/A3 page at 200 dpi; InkShifter/Hollow are too slow, Markup/BadPhotoCopy crash inside
+  Augraphy). The set is built at request validation, so a typo is a 422 before the job starts.
+- **As a library**: `degrade.maybe_degrade_page(image, options, degrade.page_seed(...))`,
+  `degrade.choose_crop(clean, noisy, min_contrast)` — the doc-generator line balancer uses the
+  same layer.
+
+Preview whole pages (lossless WebP + `pages.jsonl`), e.g. for documents from doc-generator:
+
+```bash
+python -m backend.degrade --input <pdf|folder> --out <folder> --page-share 1 --seed 1 [--effects effects.json]
+```
+
+Lossless WebP pages are heavy (1–7 MB per noisy page); this is a preview tool, the dataset
+itself is line crops.
 
 ## VLM mode (`mode="vlm"`)
 
