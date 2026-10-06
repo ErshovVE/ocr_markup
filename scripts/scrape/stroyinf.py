@@ -1,6 +1,9 @@
-"""Скачивает советские нормативы (РТМ/ОСТ/РД/ГОСТ) с files.stroyinf.ru для OCR-датасета.
+"""Скачивает нормативы (РТМ/ОСТ/РД/ГОСТ) с files.stroyinf.ru для OCR-датасета.
 
     python scripts/scrape/stroyinf.py --out data/stroyinf --limit 50
+    python scripts/scrape/stroyinf.py --out data/stroyinf_modern --min-year 1992 --max-year 2100
+
+По умолчанию — советские (год <= 1991); --min-year/--max-year задают другой диапазон.
 
 Результат в --out:
   pdf/<id>.pdf     — исходные сканы; папку можно отдавать backend'у как input_dir;
@@ -177,7 +180,7 @@ def iter_candidates(client: StroyinfClient, args):
         catalogs.append(client.catalog(groups[name], name))
     for doc in round_robin(catalogs):
         doc["year"] = doc_year(doc)
-        if doc["year"] is not None and doc["year"] <= args.max_year:
+        if doc["year"] is not None and args.min_year <= doc["year"] <= args.max_year:
             yield doc
 
 
@@ -260,7 +263,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--limit", type=int, default=50, help="размер набора в документах (0 — без лимита)"
     )
-    parser.add_argument("--max-year", type=int, default=1991, help="только документы до года")
+    parser.add_argument("--min-year", type=int, default=0, help="только документы с года (включительно)")
+    parser.add_argument("--max-year", type=int, default=1991, help="только документы до года (включительно)")
     parser.add_argument("--delay", type=float, default=1.0, help="пауза между запросами, с")
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
     args = parser.parse_args(argv)

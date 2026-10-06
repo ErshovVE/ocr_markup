@@ -46,7 +46,8 @@ No `venv` config and no lockfile in the repo — set up the environment manually
 | `python scripts/vlm/fetch_models.py <models_dir>` | Download the VLM GGUF models listed in `scripts/vlm/models.ini` |
 | `python -m backend.degrade --input <pdf\|dir> --out <dir> [--page-share 1] [--seed 0]` | Preview scan/print degradation of PDF pages (lossless WebP + `pages.jsonl`), see `backend/README.md` |
 | `python scripts/scrape/commons.py --out data/commons` | Scrape a document dataset from Wikimedia Commons |
-| `python scripts/scrape/stroyinf.py --out data/stroyinf --limit 50` | Scrape standards PDFs from stroyinf |
+| `python scripts/scrape/stroyinf.py --out data/stroyinf --limit 50` | Scrape standards PDFs from stroyinf (Soviet, year <= 1991) |
+| `python scripts/scrape/stroyinf.py --out data/stroyinf_modern --min-year 1992 --max-year 2100` | Same for modern standards (any year range) |
 | `pip-audit -r backend/requirements.txt` | Check dependencies for known vulnerabilities |
 
 <!-- END AUTO-GENERATED -->

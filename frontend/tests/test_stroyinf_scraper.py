@@ -95,9 +95,18 @@ class FakeClient:
         return type("Resp", (), {"content": self.files[Path(url).stem]})()
 
 
-def _run(tmp_path, client, limit=0):
-    args = stroyinf.parse_args(["--out", str(tmp_path), "--group", "РТМ", "--limit", str(limit)])
+def _run(tmp_path, client, limit=0, extra=()):
+    args = stroyinf.parse_args(
+        ["--out", str(tmp_path), "--group", "РТМ", "--limit", str(limit), *extra]
+    )
     return stroyinf.run(client, args)
+
+
+def test_run_year_range_takes_modern_documents(tmp_path):
+    client = FakeClient({"4": _pdf_bytes(1)})
+    assert _run(tmp_path, client, extra=("--min-year", "1992", "--max-year", "2100")) == 1
+    records = [json.loads(line) for line in open(tmp_path / "documents.jsonl", encoding="utf-8")]
+    assert [(r["id"], r["year"]) for r in records] == [("4", 1999)]
 
 
 def test_run_skips_duplicates_by_sha256(tmp_path):

@@ -44,7 +44,8 @@ pip install -r requirements-dev.txt        # pytest, ruff — общие для 
 | `python scripts/vlm/fetch_models.py <папка_моделей>` | Скачать GGUF-модели VLM из `scripts/vlm/models.ini` |
 | `python -m backend.degrade --input <pdf\|папка> --out <папка> [--page-share 1] [--seed 0]` | Предпросмотр порчи страниц PDF (WebP без потерь + `pages.jsonl`), см. `backend/README.md` |
 | `python scripts/scrape/commons.py --out data/commons` | Скачать датасет документов с Wikimedia Commons |
-| `python scripts/scrape/stroyinf.py --out data/stroyinf --limit 50` | Скачать PDF стандартов со stroyinf |
+| `python scripts/scrape/stroyinf.py --out data/stroyinf --limit 50` | Скачать PDF стандартов со stroyinf (советские, год <= 1991) |
+| `python scripts/scrape/stroyinf.py --out data/stroyinf_modern --min-year 1992 --max-year 2100` | То же для современных (любой диапазон лет) |
 | `pip-audit -r backend/requirements.txt` | Проверка зависимостей на известные уязвимости |
 
 <!-- END AUTO-GENERATED -->
