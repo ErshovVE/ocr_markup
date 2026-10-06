@@ -11,7 +11,7 @@
 
 ## Требования
 
-- Python 3.12 (см. `frontend/Dockerfile`/`backend/Dockerfile` — `python:3.12-slim`; `target-version = "py311"` в `pyproject.toml` — это только нижняя граница синтаксической совместимости для ruff, а не фактическое требование)
+- Python 3.12 (см. `frontend/Dockerfile`/`backend/Dockerfile` — `python:3.12-slim`; `target-version = "py312"` в `pyproject.toml` с ним совпадает)
 - Системный бинарник Tesseract с языковыми пакетами `rus`/`eng`, если работаете с `backend/` (см. `backend/README.md`)
 - Docker + Docker Compose — опционально, для запуска обоих сервисов без локальной установки зависимостей (см. `docs/docker.md`)
 
@@ -22,7 +22,7 @@ Frontend и backend — независимые сервисы с раздель�
 ```bash
 pip install -r frontend/requirements.txt   # Streamlit-приложение
 pip install uv                            # backend'у нужен --override из uv, см. backend/overrides.txt
-uv pip install -r backend/requirements.txt --override backend/overrides.txt  # FastAPI OCR-consensus спайк
+uv pip install -r backend/requirements.txt --override backend/overrides.txt  # FastAPI OCR-consensus спайк (в т.ч. augraphy для degrade_*)
 pip install -r requirements-dev.txt        # pytest, ruff — общие для обоих
 ```
 
@@ -39,6 +39,13 @@ pip install -r requirements-dev.txt        # pytest, ruff — общие для 
 | `ruff check .` | Линтер (репозиторий целиком) |
 | `ruff format .` | Форматтер |
 | `docker compose up --build` | Запуск обоих сервисов в контейнерах, см. `docs/docker.md` |
+| `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build` | Backend на GPU (Surya на видеокарте, нужен nvidia-container-toolkit), см. `docs/docker.md` |
+| `docker compose --profile vlm-cpu up -d` / `--profile vlm-gpu` | Сервер llama.cpp для `mode="vlm"`; или `./scripts/vlm/setup.sh --cpu\|--gpu\|--native` (`scripts/vlm/setup.ps1` на Windows) |
+| `python scripts/vlm/fetch_models.py <папка_моделей>` | Скачать GGUF-модели VLM из `scripts/vlm/models.ini` |
+| `python -m backend.degrade --input <pdf\|папка> --out <папка> [--page-share 1] [--seed 0]` | Предпросмотр порчи страниц PDF (WebP без потерь + `pages.jsonl`), см. `backend/README.md` |
+| `python scripts/scrape/commons.py --out data/commons` | Скачать датасет документов с Wikimedia Commons |
+| `python scripts/scrape/stroyinf.py --out data/stroyinf --limit 50` | Скачать PDF стандартов со stroyinf |
+| `pip-audit -r backend/requirements.txt` | Проверка зависимостей на известные уязвимости |
 
 <!-- END AUTO-GENERATED -->
 

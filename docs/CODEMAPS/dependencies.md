@@ -1,28 +1,37 @@
-<!-- Generated: 2026-08-19 | Files scanned: 6 | Token estimate: ~250 -->
+<!-- Generated: 2026-10-06 | Files scanned: requirements*.txt, docker-compose*.yml, Dockerfiles, scripts/vlm | Token estimate: ~550 -->
 
 # Dependencies
 
+## Backend (`backend/requirements.txt`, install with `uv … --override backend/overrides.txt`)
+- fastapi + uvicorn[standard] + python-multipart — API (`main.py`)
+- paddleocr 3.7.0 + paddlepaddle 3.3.1 — detection (PP-OCRv6) and recognition (cyrillic PP-OCRv5 mobile / latin PP-OCRv6)
+- surya-ocr 0.16.0 — detection + recognition (pins resolved via overrides.txt)
+- pytesseract — wraps the system Tesseract binary (`rus`/`eng` packs; not a pip dependency)
+- opencv-python (+ libgl1/libglib2.0-0 in the image) — image ops; augraphy — page degradation (`degrade.py`, MIT;
+  pulls numba, scikit-image, scikit-learn)
+- Pillow (WebP crops) · pypdfium2 5.x (render + text layer) · httpx (VLM client)
+
 ## Frontend (`frontend/requirements.txt`)
-- streamlit==1.36.0 — UI framework, sole entry point `app.py`
-- Pillow==10.4.0 — image load/resize/rotate (`src/image_ops.py`)
-- requests==2.32.3 — HTTP calls to backend from `src/ui/generation_view.py` (`CONSENSUS_BACKEND_URL`, default `http://127.0.0.1:8756`)
-- PyInstaller — standalone .exe packaging (`frontend/wrapper.py`, `frontend/pyinst_command.txt`), not in requirements.txt
+streamlit ≥1.37 · Pillow · requests (→ backend, `CONSENSUS_BACKEND_URL`). PyInstaller for the .exe (not listed).
 
-## Backend (`backend/requirements.txt`)
-- FastAPI + uvicorn — API framework, entry point `backend/main.py`
-- PaddleOCR — TextDetection (PP-OCRv6) in `detector.py`; TextRecognition (cyrillic_PP-OCRv5_mobile_rec + latin PP-OCRv6) in `recognizers.py`; `enable_mkldnn=False` workaround for a paddlepaddle build crash
-- SuryaOCR — recognition engine, `recognizers.py`
-- Tesseract — system binary, called via pytesseract/subprocess in `recognizers.py`/`models_status.py`; requires `rus`/`eng` lang packs installed on host — not a pip dependency
+## Dev (`requirements-dev.txt`)
+pytest, pytest-cov, ruff (config in pyproject.toml), pip-audit, pypdfium2 + numpy (pdf_extract tests). Augraphy is
+deliberately not here — degrade tests that need it skip.
 
-## Dev/shared (`requirements-dev.txt`)
-- pytest — test runner for both `frontend/tests/` and `backend/tests/` (via `testpaths` in `pyproject.toml`)
-- ruff — lint/format, config in `pyproject.toml`, applies repo-wide
-
-## External services
-None (no cloud APIs, no payment/auth providers). All OCR runs locally.
+## External services / runtimes
+- llama.cpp `llama-server` (ghcr.io/ggml-org/llama.cpp:server-b11206 / server-cuda) in router mode, one model loaded at a
+  time; GGUF presets in `scripts/vlm/models.ini`, fetched by `scripts/vlm/fetch_models.py` (compose `vlm-models`).
+  VLM_ENDPOINT (default http://localhost:8080; `http://llama-vlm:8080` in compose).
+- Model downloads on first use: PaddleX and Surya caches (compose volumes `paddleocr-models`, `surya-models`).
+- Scrapers (`scripts/scrape/`): Wikimedia Commons, stroyinf — network, no API keys.
+- No cloud APIs, no auth/payment providers.
 
 ## Infra
-- Docker / docker-compose — two independent containers (frontend, backend), no required inter-container network beyond the HTTP call frontend→backend (`docs/docker.md`)
+docker compose: frontend, backend (+ `docker-compose.gpu.yml` → `backend/Dockerfile.gpu`), profiles vlm-cpu/vlm-gpu.
+
+## Consumers of this repo
+doc-generator (sibling) imports `backend/pdf_extract.py`, `backend/labels.py`, `backend/degrade.py` via sys.path
+(OCR_MARKUP_PATH) — keep their public functions stable.
 
 ## Not part of either service
-`predict.py` / `predict.ipynb` (repo root) — offline OCR-labeling-data generation scripts with a separate, heavier, unlisted dependency set: opencv-python, surya-ocr, tqdm, and a private `ocr_library` package; hardcoded local model paths, not installable from either `requirements.txt`.
+`predict.py` / `predict.ipynb` — offline scripts with their own unlisted deps (surya, tqdm, private `ocr_library`).

@@ -32,6 +32,15 @@ models or system binaries — so unlike the above, it's fully unit-tested
 against synthetic PDFs (`pypdfium2` and `numpy` were added to
 `requirements-dev.txt` specifically for this).
 
+`backend/degrade.py` (page degradation, `backend/tests/test_degrade.py`): the line
+legibility check, effect-spec validation, page seeds, the text-layer path of
+`pipeline.run` (with the degradation call mocked) and the `degrade_*` request
+validation run without Augraphy. The few tests that need real Augraphy (page
+geometry, the default effect set, the preview CLI, API validation of the default
+set) are `pytest.importorskip("augraphy")` — `augraphy` (numba, scikit-image, …)
+is deliberately not in `requirements-dev.txt`; it comes with
+`backend/requirements.txt`, so run those in the backend environment/image.
+
 ## Linting
 
 [ruff](https://docs.astral.sh/ruff/) is used both as the linter and the

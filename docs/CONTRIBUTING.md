@@ -13,7 +13,7 @@
 
 ## Requirements
 
-- Python 3.12 (see `frontend/Dockerfile`/`backend/Dockerfile` — `python:3.12-slim`; ruff's `target-version = "py311"` in `pyproject.toml` is only the linter's syntax-compatibility floor, not the actual requirement)
+- Python 3.12 (see `frontend/Dockerfile`/`backend/Dockerfile` — `python:3.12-slim`; ruff's `target-version = "py312"` in `pyproject.toml` matches it)
 - A system Tesseract binary with the `rus`/`eng` language packs if you're working on `backend/` (see `backend/README.md`)
 - Docker + Docker Compose — optional, for running both services without installing dependencies locally (see `docs/docker.md`)
 
@@ -24,7 +24,7 @@ Frontend and backend are independent services with separate dependency sets:
 ```bash
 pip install -r frontend/requirements.txt   # the Streamlit app
 pip install uv                            # backend needs uv's --override, see backend/overrides.txt
-uv pip install -r backend/requirements.txt --override backend/overrides.txt  # the FastAPI OCR-consensus spike
+uv pip install -r backend/requirements.txt --override backend/overrides.txt  # the FastAPI OCR-consensus spike (incl. augraphy for degrade_*)
 pip install -r requirements-dev.txt        # pytest, ruff — shared by both
 ```
 
@@ -41,6 +41,13 @@ No `venv` config and no lockfile in the repo — set up the environment manually
 | `ruff check .` | Linter (whole repo) |
 | `ruff format .` | Formatter |
 | `docker compose up --build` | Run both services in containers, see `docs/docker.md` |
+| `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build` | GPU backend (Surya on the GPU, needs nvidia-container-toolkit), see `docs/docker.md` |
+| `docker compose --profile vlm-cpu up -d` / `--profile vlm-gpu` | llama.cpp server for `mode="vlm"`; or `./scripts/vlm/setup.sh --cpu\|--gpu\|--native` (`scripts/vlm/setup.ps1` on Windows) |
+| `python scripts/vlm/fetch_models.py <models_dir>` | Download the VLM GGUF models listed in `scripts/vlm/models.ini` |
+| `python -m backend.degrade --input <pdf\|dir> --out <dir> [--page-share 1] [--seed 0]` | Preview scan/print degradation of PDF pages (lossless WebP + `pages.jsonl`), see `backend/README.md` |
+| `python scripts/scrape/commons.py --out data/commons` | Scrape a document dataset from Wikimedia Commons |
+| `python scripts/scrape/stroyinf.py --out data/stroyinf --limit 50` | Scrape standards PDFs from stroyinf |
+| `pip-audit -r backend/requirements.txt` | Check dependencies for known vulnerabilities |
 
 <!-- END AUTO-GENERATED -->
 

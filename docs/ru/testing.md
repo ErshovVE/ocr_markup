@@ -33,6 +33,15 @@ pytest --cov=src --cov=backend --cov-report=term-missing
 юнит-тестируется на синтетических PDF (`pypdfium2` и `numpy` добавлены в
 `requirements-dev.txt` именно для этого).
 
+`backend/degrade.py` (порча страниц, `backend/tests/test_degrade.py`): проверка
+читаемости строки, проверка описаний эффектов, сиды страниц, путь текстового слоя в
+`pipeline.run` (вызов порчи подменён) и проверка полей `degrade_*` в запросе идут без
+Augraphy. Немногие тесты, которым нужна настоящая Augraphy (геометрия страницы, набор
+эффектов по умолчанию, команда предпросмотра, проверка набора по умолчанию в API), —
+`pytest.importorskip("augraphy")`: `augraphy` (numba, scikit-image, …) намеренно не
+входит в `requirements-dev.txt`, она ставится с `backend/requirements.txt`, так что эти
+тесты запускаются в окружении/образе backend.
+
 ## Линтер
 
 [ruff](https://docs.astral.sh/ruff/) используется и как линтер, и как

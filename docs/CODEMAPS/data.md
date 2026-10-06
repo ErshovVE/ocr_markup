@@ -1,28 +1,35 @@
-<!-- Generated: 2026-08-21 | Files scanned: 4 | Token estimate: ~400 -->
+<!-- Generated: 2026-10-06 | Files scanned: pipeline.py, pipeline_vlm.py, jobs.py, degrade.py, frontend/src/{annotations,backup,models}.py | Token estimate: ~650 -->
 
 # Data
 
-No database. All persistence is flat files on disk, shared by convention between frontend and backend. Full detail in `docs/architecture.md` (repo root docs) — this is the token-lean index.
+No database, no migrations. Everything is flat files with conventions shared by frontend and backend (full parsing
+rules in `docs/architecture.md`). This is the token-lean index.
 
-## Frontend-owned files (per labeling working dir)
-- `rec.txt` / uploaded `.txt` — tab-separated `relative_path\tannotation`, one row per image
-- `status_cache.txt` — marked filenames, one per line; path is `base_dir/<first_path_segment>/status_cache.txt`
-- `handwritten.txt` — append-only; dedup by exact line match
-- `.backups/metadata.json` — JSON `{"backups": [...]}`, rotated to 5 entries (`src/backup.py::BackupManager`)
+## Backend output (per job `output_dir`)
+- `good.txt` / `needs_review.txt` — `crops/…/image_NNNNN.webp\ttext[\tw\th]` (`append_crop_size` adds crop width/height);
+  overwritten each run, written+flushed per line. `normalize_labels` maps typographic variants (labels.py);
+  `alphabet_file` sends lines with out-of-dictionary symbols to needs_review.
+- `crops/{N // 10000}/image_{N:05d}.webp` — lossless WebP, N continues from the max on disk (`_resume_img_count`),
+  never overwritten.
+- `debug.jsonl` — per OCR/VLM line `{crop, bucket, engine, diverged, engines: {name: {text, score}}}` (VLM score = 1.0);
+  not written for text-layer lines (no vote). Read by `frontend/src/annotations.py::_load_debug_file`.
+- `degrade.jsonl` — only with `degrade_page_share > 0`: per line of a degraded page `{crop, source, degraded}`,
+  `degraded` true (degraded crop) | false (unreadable → clean crop) | null (no effect touched the line).
+- `_job_status.json` — `status_dict` snapshot written per processed file and at job end (`/jobs/status_snapshot`).
 
-## Backend-owned files (per OCR-consensus job output dir)
-- `good.txt` — consensus-passed rows, overwritten each pipeline run
-- `needs_review.txt` — below-threshold rows, overwritten each pipeline run
-- `crops/{N // 10000}/image_{N:05d}.webp` — sequential-id crop images (`backend/config.py::CROPS_PER_FOLDER`), predict.py's old convention, not uuid4; never overwritten — a rerun on the same output_dir resumes N from the max found on disk (`backend/pipeline.py::_resume_img_count`)
-- `debug.jsonl` — one JSON line per recognized crop: `{crop, bucket, engine, diverged, engines: {paddle|surya|tesseract: {text, score}}}`; overwritten each run alongside good.txt/needs_review.txt; the only surviving record of per-engine texts/scores (vote() keeps only the winner) — consumed by `frontend/src/annotations.py::AnnotationManager._load_debug_file`
-- `_job_status.json` — snapshot of the running/last job's status_dict (backend/jobs.py::_write_snapshot), written on every processed file and at job end; lets `GET /jobs/status_snapshot?output_dir=...` report what happened even after a backend restart, when the in-memory job registry (below) is gone
+## Preview output (`python -m backend.degrade`)
+`<stem>_pNNN.webp` (lossless, whole pages) + `pages.jsonl` `{file, page, image, degraded}`.
+
+## Frontend-owned files (labeling working dir)
+- `rec.txt` / uploaded `.txt` — `relative_path\tannotation[\tw\th]` (crop size kept and swapped on 90° rotation)
+- `status_cache.txt` — marked filenames · `handwritten.txt` — append-only, dedup by line
+- `.backups/metadata.json` — `{"backups": [...]}`, rotated to 5 (`BackupManager`)
+- `ImageRecord`: relative_path, absolute_path, annotation, is_marked, diverged (from debug.jsonl), crop_size
 
 ## Cross-service link
-Backend output (`good.txt` + `needs_review.txt` + optional `debug.jsonl`) is the direct input to `frontend/src/ui/generation_view.py::_build_manager_from_output`, which builds a frontend `AnnotationManager` reading those files. This is the only place the two services' file formats must agree.
+`generation_view._build_manager_from_output(output_dir)` reads good.txt + needs_review.txt (+ debug.jsonl) into an
+`AnnotationManager` — the only place both services' formats must agree.
 
-## In-memory state (not persisted)
-- `backend/jobs.py::_jobs` — job status/results, one job at a time by design; lost on backend restart **except** the last-written `_job_status.json` snapshot per output_dir (see above) — data itself (good.txt/needs_review.txt/debug.jsonl/crops) is never at risk since those are flushed to disk per line, only the *tracking* of a job's progress is memory-only
-- `backend/models_status.py` — model-readiness state, lost on backend restart (though re-derived from on-disk model caches on next check)
-
-## Migration history
-None — no schema, no migrations. Flat-file formats are stable by convention (see `docs/architecture.md` for exact parsing rules if changing them).
+## In-memory only
+`jobs._jobs` (job registry, lost on restart except `_job_status.json`), `models_status` state (re-derived from model
+caches), VLM endpoint status cache (TTL 8 s).
