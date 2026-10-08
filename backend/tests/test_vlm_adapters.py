@@ -112,3 +112,18 @@ def test_official_prompts():
         "dots_ocr": "Extract the text content from this image.",
         "unlimited_ocr": "Free OCR.",
     }
+
+
+def test_line_prompts_cover_line_vlm_engines():
+    from backend.config import LINE_VLM_ENGINES
+
+    assert set(vlm_adapters.LINE_PROMPTS) == set(LINE_VLM_ENGINES)
+    assert vlm_adapters.LINE_PROMPTS["paddleocr_vl"] == "OCR:"
+
+
+def test_parse_line_text_joins_wrapped_lines_and_handles_empty():
+    assert vlm_adapters.parse_line_text("первая часть\nвторая часть\n") == (
+        "первая часть вторая часть"
+    )
+    assert vlm_adapters.parse_line_text("") == ""
+    assert vlm_adapters.parse_line_text(None) == ""

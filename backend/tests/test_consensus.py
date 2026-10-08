@@ -130,3 +130,57 @@ def test_vote_strict_hint_prefers_preferred_model_text():
     bucket, text, engine, _ = vote(results, threshold=0.9, preferred_model="surya", min_agree=2)
 
     assert (bucket, text, engine) == ("needs_review", "b", "surya")
+
+
+def test_vote_with_key_agrees_ignoring_spaces():
+    from backend.text_keys import no_spaces_key
+
+    results = {
+        "custom": ("2.5.1", 0.9),
+        "surya": ("2 .5 .1", 0.8),
+        "vlm_line": ("2.8.1", 1.0),
+    }
+
+    bucket, text, engine, diverged = vote(results, threshold=0.5, key=no_spaces_key)
+
+    assert (bucket, text, engine) == ("good", "2.5.1", "custom")
+    assert diverged is True
+
+
+def test_vote_with_key_returns_preferred_text_from_winning_group():
+    from backend.text_keys import no_spaces_key
+
+    results = {"custom": ("2.5.1", 0.9), "surya": ("2 .5 .1", 0.8)}
+
+    bucket, text, engine, _ = vote(
+        results, threshold=0.5, preferred_model="surya", key=no_spaces_key
+    )
+
+    assert (bucket, text, engine) == ("good", "2 .5 .1", "surya")
+
+
+def test_vote_with_key_ignores_preferred_outside_winning_group():
+    from backend.text_keys import no_spaces_key
+
+    results = {"custom": ("abc", 0.9), "surya": ("a bc", 0.8), "vlm_line": ("xyz", 1.0)}
+
+    _, text, engine, _ = vote(results, threshold=0.5, preferred_model="vlm_line", key=no_spaces_key)
+
+    assert (text, engine) == ("abc", "custom")
+
+
+def test_vote_without_key_still_exact():
+    results = {"custom": ("2.5.1", 0.9), "surya": ("2 .5 .1", 0.8)}
+
+    bucket, _, _, diverged = vote(results, threshold=0.5)
+
+    assert bucket == "needs_review"
+    assert diverged is True
+
+
+def test_vote_with_key_not_diverged_when_keys_equal():
+    from backend.text_keys import no_spaces_key
+
+    results = {"custom": ("2.5.1", 0.9), "surya": ("2 .5 .1", 0.8)}
+
+    assert vote(results, threshold=0.5, key=no_spaces_key)[3] is False

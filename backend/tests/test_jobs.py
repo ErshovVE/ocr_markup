@@ -37,6 +37,7 @@ def _fake_pipeline_run(n_files=3, sleep_s=0.0, n_errors=0):
         normalize_labels=False,
         alphabet=None,
         degrade=None,
+        options=None,
     ):
         if on_found:
             on_found(n_files)
@@ -253,3 +254,57 @@ def test_prune_keeps_only_the_newest_finished_jobs(monkeypatch):
         jobs._prune_finished_jobs()
 
     assert list(jobs._jobs) == ["done-2", "done-3", "running"]
+
+
+def test_start_job_crops_mode_calls_pipeline_crops(monkeypatch, tmp_path):
+    from backend.pipeline import RecognitionOptions
+
+    seen = {}
+
+    def fake_crops_run(label_file, data_dir, output_dir, threshold, preferred_model, **kwargs):
+        seen.update(kwargs, label_file=label_file, data_dir=data_dir, preferred=preferred_model)
+        kwargs["on_found"](1)
+        kwargs["on_line_done"]("good", False)
+        kwargs["on_file_done"]()
+        return 1, 0
+
+    monkeypatch.setattr(jobs.pipeline_crops, "run", fake_crops_run)
+    options = RecognitionOptions(custom_model_dir="/m", vote_key="no_spaces")
+
+    job_id = jobs.start_job(
+        str(tmp_path),
+        str(tmp_path / "out"),
+        0.9,
+        "custom",
+        engines=["custom", "surya"],
+        min_agree=2,
+        mode="crops",
+        label_file="labels.txt",
+        label_votes=True,
+        options=options,
+    )
+    state = _wait_until_finished(job_id)
+
+    assert state.status == "done"
+    assert state.result["good_count"] == 1
+    assert seen["label_file"] == "labels.txt" and seen["data_dir"] == str(tmp_path)
+    assert seen["preferred"] == "custom"
+    assert seen["label_votes"] is True and seen["options"] is options
+    assert seen["engines"] == ["custom", "surya"] and seen["min_agree"] == 2
+
+
+def test_start_job_consensus_passes_recognition_options(monkeypatch, tmp_path):
+    from backend.pipeline import RecognitionOptions
+
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs)
+        return 0, 0
+
+    monkeypatch.setattr(jobs.pipeline, "run", fake_run)
+    options = RecognitionOptions(line_vlm_engine="glm_ocr")
+
+    _wait_until_finished(jobs.start_job(str(tmp_path), str(tmp_path / "out"), 0.9, options=options))
+
+    assert seen["options"] is options

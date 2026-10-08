@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
@@ -23,6 +24,7 @@ from backend.config import (
     IMAGE_EXTENSIONS,
     PDF_EXTENSIONS,
     RECOGNITION_BATCH_SIZE,
+    VLM_REQUEST_TIMEOUT_SECONDS,
 )
 from backend.consensus import vote
 from backend.detector import DEFAULT_DETECTOR_ENGINE, Detector
@@ -30,11 +32,14 @@ from backend.labels import normalize_label, out_of_alphabet
 from backend.recognizers import (
     DEFAULT_LATIN_MODEL_SIZE,
     EMPTY_RESULT,
+    recognize_custom_batch,
     recognize_paddle_batch,
     recognize_paddle_latin_batch,
     recognize_surya_batch,
     recognize_tesseract_batch,
+    recognize_vlm_line_batch,
 )
+from backend.text_keys import DEFAULT_VOTE_KEY, vote_key
 from backend.vlm_geometry import clamped_bbox
 
 MIN_CROP_PIX = 10
@@ -55,6 +60,10 @@ _ENGINE_LOCKS: Dict[str, threading.Lock] = {
     "paddle": threading.Lock(),
     "surya": threading.Lock(),
     "tesseract": threading.Lock(),
+    # custom — свой предиктор PaddleOCR (не thread-safe, как paddle); vlm_line
+    # потокобезопасен (HTTP), но лок нужен для streak-гвардии и брошенных потоков.
+    "custom": threading.Lock(),
+    "vlm_line": threading.Lock(),
     # Детектор строк — та же защита (см. _detect_with_timeout): зависший
     # detect() не вешает job, три зависания подряд снимают его до конца job'а.
     "detector": threading.Lock(),
@@ -65,6 +74,21 @@ _ENGINE_LOCKS: Dict[str, threading.Lock] = {
 _MAX_ENGINE_TIMEOUT_STREAK = 3
 _engine_timeout_streak: Dict[str, int] = {}
 _engine_disabled: set = set()
+
+
+@dataclass
+class RecognitionOptions:
+    """Параметры распознавания сверх классических движков — общие для
+    консенсуса по страницам (run) и по готовым кропам (backend/pipeline_crops.py).
+
+    custom_model_dir — экспорт своей модели PaddleOCR (движок "custom");
+    line_vlm_engine — VLM для построчного чтения (движок "vlm_line", см.
+    config.LINE_VLM_ENGINES); vote_key — ключ сравнения текстов в vote()
+    (backend/text_keys.py)."""
+
+    custom_model_dir: Optional[str] = None
+    line_vlm_engine: Optional[str] = None
+    vote_key: str = DEFAULT_VOTE_KEY
 
 
 def reset_engine_guard() -> None:
@@ -79,8 +103,14 @@ def _run_engines_with_timeout(
     source_label: str,
     on_error: Optional[Callable[[str], None]] = None,
     empty_result=EMPTY_RESULT,
+    engine_timeouts: Optional[Dict[str, float]] = None,
 ) -> Dict[str, object]:
     """Запускает несколько recognize_*-вызовов параллельно с общим таймаутом на все вместе.
+
+    engine_timeouts — свой бюджет для отдельных движков (например, vlm_line:
+    VLM на CPU отвечает минутами); остальные ждут timeout. Отсчёт у всех от
+    одного старта, поэтому медленный VLM не растягивает ожидание зависшего
+    Paddle/Surya в том же батче.
 
     calls: {имя_движка: (функция, аргументы)}. Если вызов не уложился в общий
     таймаут, для этого движка возвращается empty_result (для батча строк —
@@ -125,13 +155,16 @@ def _run_engines_with_timeout(
     for thread in threads.values():
         thread.start()
 
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    engine_timeouts = engine_timeouts or {}
     results: Dict[str, object] = {name: empty_result for name in calls}
-    for name, thread in threads.items():
-        remaining = max(0.0, deadline - time.monotonic())
-        thread.join(remaining)
+    # Сначала движки с коротким бюджетом: join() идут по очереди, и короткий
+    # дедлайн не должен ждать, пока истечёт длинный.
+    for name, thread in sorted(threads.items(), key=lambda i: engine_timeouts.get(i[0], timeout)):
+        engine_timeout = engine_timeouts.get(name, timeout)
+        thread.join(max(0.0, started + engine_timeout - time.monotonic()))
         if thread.is_alive():
-            msg = f"Таймаут {timeout}с у движка {name}: {source_label}"
+            msg = f"Таймаут {engine_timeout}с у движка {name}: {source_label}"
             logger.warning(msg)
             if on_error:
                 on_error(msg)
@@ -162,11 +195,15 @@ def _build_engine_calls(
     lang: str,
     latin_model_size: str,
     tesseract_lang: str,
+    options: Optional[RecognitionOptions] = None,
+    on_error: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Tuple[Callable, tuple]]:
     """Собирает {имя_движка: (функция, аргументы)} только для выбранных
     движков (см. RunRequest.engines в backend/main.py). Каждый вызов —
     батч: один и тот же список кропов строк на все движки, результат —
-    список (text, score) в том же порядке."""
+    список (text, score) в том же порядке. custom/vlm_line берут модель из
+    options (main.py не пропускает их без custom_model_dir/line_vlm_engine)."""
+    options = options or RecognitionOptions()
     calls: Dict[str, Tuple[Callable, tuple]] = {}
     if "paddle" in engines:
         if lang == "ru":
@@ -177,6 +214,10 @@ def _build_engine_calls(
         calls["surya"] = (recognize_surya_batch, (crops,))
     if "tesseract" in engines:
         calls["tesseract"] = (recognize_tesseract_batch, (crops, tesseract_lang))
+    if "custom" in engines:
+        calls["custom"] = (recognize_custom_batch, (crops, options.custom_model_dir))
+    if "vlm_line" in engines:
+        calls["vlm_line"] = (recognize_vlm_line_batch, (crops, options.line_vlm_engine, on_error))
     return calls
 
 
@@ -222,14 +263,18 @@ def _recognize_batch(
     tesseract_lang: str,
     source_label: str,
     on_error: Optional[Callable[[str], None]],
+    options: Optional[RecognitionOptions] = None,
 ) -> List[Dict[str, Tuple[str, float]]]:
     """Батч кропов → по строке {движок: (text, score)}.
 
     Движки идут параллельно, каждый — одним вызовом на весь батч. Бюджет
     времени — ENGINE_CALL_TIMEOUT_SECONDS на строку × размер батча (тот же,
-    что был у построчного вызова); не уложившийся движок даёт пустые
-    результаты на все строки батча."""
-    calls = _build_engine_calls(engines, crops, lang, latin_model_size, tesseract_lang)
+    что был у построчного вызова); у vlm_line свой — VLM_REQUEST_TIMEOUT_SECONDS
+    на строку (VLM на CPU отвечает минутами), остальные движки его не ждут.
+    Не уложившийся движок даёт пустые результаты на все строки батча."""
+    calls = _build_engine_calls(
+        engines, crops, lang, latin_model_size, tesseract_lang, options, on_error
+    )
     empty = [EMPTY_RESULT] * len(crops)
     per_engine = _run_engines_with_timeout(
         calls,
@@ -237,6 +282,7 @@ def _recognize_batch(
         f"{source_label} ({len(crops)} строк)",
         on_error=on_error,
         empty_result=empty,
+        engine_timeouts={"vlm_line": VLM_REQUEST_TIMEOUT_SECONDS * len(crops)},
     )
     rows: List[Dict[str, Tuple[str, float]]] = [{} for _ in crops]
     for name, results in per_engine.items():
@@ -369,6 +415,7 @@ def _process_boxes(
     engines: List[str] = DEFAULT_ENGINES,
     min_agree: int = DEFAULT_MIN_AGREE,
     detector_engine: str = "paddle",
+    options: Optional[RecognitionOptions] = None,
 ) -> None:
     """Прогоняет обнаруженные детектором боксы через консенсус выбранных движков.
 
@@ -421,7 +468,7 @@ def _process_boxes(
             return
         batch = crops[start : start + RECOGNITION_BATCH_SIZE]
         rows = _recognize_batch(
-            batch, engines, lang, latin_model_size, tesseract_lang, source_label, on_error
+            batch, engines, lang, latin_model_size, tesseract_lang, source_label, on_error, options
         )
         for img_crop, results in zip(batch, rows, strict=True):
             if should_cancel and should_cancel():
@@ -439,6 +486,7 @@ def _process_boxes(
                 on_line_done,
                 on_error,
                 write_debug,
+                options,
             )
 
 
@@ -455,6 +503,7 @@ def _write_voted_line(
     on_line_done: Optional[Callable[[str, bool], None]],
     on_error: Optional[Callable[[str], None]],
     write_debug: Optional[Callable[[dict], None]],
+    options: Optional[RecognitionOptions] = None,
 ) -> None:
     """Голосование по одной строке батча + запись кропа/строки/debug."""
     try:
@@ -471,7 +520,10 @@ def _write_voted_line(
                     on_error(msg)
                 return
 
-        bucket, text, engine, diverged = vote(results, threshold, preferred_model, min_agree)
+        key = vote_key(options.vote_key) if options else None
+        bucket, text, engine, diverged = vote(
+            results, threshold, preferred_model, min_agree, key=key
+        )
 
         crop_relative, crop_absolute = allocate_crop_path()
         _save_crop(img_crop, crop_absolute)
@@ -518,6 +570,7 @@ def _process_pdf(
     pdf_ocr_fallback: bool = True,
     degrade: Optional[page_degrade.DegradeOptions] = None,
     write_degrade: Optional[Callable[[dict], None]] = None,
+    options: Optional[RecognitionOptions] = None,
 ) -> None:
     """Обрабатывает один PDF-файл постранично: каждая страница — либо прямым
     извлечением текстового слоя (без OCR), либо обычным OCR-консенсусом
@@ -573,6 +626,7 @@ def _process_pdf(
                         else None
                     ),
                     write_degrade=write_degrade,
+                    options=options,
                 )
             finally:
                 # Явно закрываем per-page нативные буферы pdfium сразу, а не
@@ -645,6 +699,7 @@ def _process_pdf_page(
     degrade: Optional[page_degrade.DegradeOptions] = None,
     degrade_rng=None,
     write_degrade: Optional[Callable[[dict], None]] = None,
+    options: Optional[RecognitionOptions] = None,
 ) -> None:
     """Обрабатывает одну страницу PDF (см. _process_pdf) — текстовый слой либо
     OCR-консенсус растровой страницы.
@@ -723,6 +778,7 @@ def _process_pdf_page(
             engines=engines,
             min_agree=min_agree,
             detector_engine=detector_engine,
+            options=options,
         )
 
 
@@ -747,6 +803,7 @@ def run(
     normalize_labels: bool = False,
     alphabet: Optional[FrozenSet[str]] = None,
     degrade: Optional[page_degrade.DegradeOptions] = None,
+    options: Optional[RecognitionOptions] = None,
 ) -> Tuple[int, int]:
     """Обрабатывает папку документов (изображения + PDF): детекция ->
     распознавание выбранными движками -> голосование; для PDF с текстовым
@@ -760,6 +817,8 @@ def run(
     degrade — порча страниц PDF с текстовым слоем (backend/degrade.py, см.
     _process_pdf_page); при включённой порче в output_dir пишется degrade.jsonl
     (по записи на строку испорченной страницы).
+    options — модели движков custom/vlm_line и ключ сравнения vote_key
+    (RecognitionOptions).
 
     engines/min_agree — схема выбора движков распознавания ("1 из 1"/
     "1 из 2"/"2 из 2"/"2 из 3", см. RunRequest в backend/main.py и
@@ -891,6 +950,7 @@ def run(
                 engines=engines,
                 min_agree=min_agree,
                 detector_engine=detector_engine,
+                options=options,
             )
             if on_file_done:
                 on_file_done()
@@ -920,6 +980,7 @@ def run(
                     pdf_ocr_fallback=pdf_ocr_fallback,
                     degrade=degrade,
                     write_degrade=write_degrade if degrade_file is not None else None,
+                    options=options,
                 )
             except Exception as e:
                 msg = f"Ошибка обработки файла {file_path}: {e}"

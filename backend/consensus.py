@@ -1,5 +1,5 @@
 from collections import Counter
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 
 def vote(
@@ -7,6 +7,7 @@ def vote(
     threshold: float,
     preferred_model: Optional[str] = None,
     min_agree: int = 2,
+    key: Optional[Callable[[str], str]] = None,
 ) -> Tuple[str, str, str, bool]:
     """Голосование по результатам движков распознавания: (bucket, text, engine, diverged)
 
@@ -25,23 +26,25 @@ def vote(
     статистики/трекера прогресса (backend/jobs.py): в отличие от обычного
     needs_review (никто не уверен), здесь несколько движков уверены, но
     расходятся между собой.
+
+    key — функция-ключ сравнения текстов (backend/text_keys.py): совпадение и
+    diverged считаются по key(text), а не по тексту. Возвращается текст
+    движка, а не ключ: предпочитаемого, если его ключ победил, иначе первого
+    по порядку results из согласной группы. None — посимвольно, как раньше.
     """
-    confident_texts = {text for text, score in results.values() if text and score >= threshold}
-    diverged = len(confident_texts) >= 2
+    key_of = key or _identity
+    diverged = is_diverged(results, threshold, key)
 
     if not results:
         return "needs_review", "", "", diverged
 
     if min_agree >= 2:
-        texts = [text for text, _ in results.values() if text]
-        if texts:
-            counts = Counter(texts)
-            winner_text, winner_count = counts.most_common(1)[0]
+        keys = [key_of(text) for text, _ in results.values() if text]
+        if keys:
+            winner_key, winner_count = Counter(keys).most_common(1)[0]
             if winner_count >= min_agree:
-                winner_engine = next(
-                    eng for eng, (text, _) in results.items() if text == winner_text
-                )
-                return "good", winner_text, winner_engine, diverged
+                winner_engine = _winner_engine(results, winner_key, key_of, preferred_model)
+                return "good", results[winner_engine][0], winner_engine, diverged
         hint_engine = _hint_engine(results, preferred_model)
         return "needs_review", results[hint_engine][0], hint_engine, diverged
 
@@ -56,6 +59,38 @@ def vote(
         return "good", best_text, best_engine, diverged
 
     return "needs_review", best_text, best_engine, diverged
+
+
+def is_diverged(
+    results: Dict[str, Tuple[str, float]],
+    threshold: float,
+    key: Optional[Callable[[str], str]] = None,
+) -> bool:
+    """Минимум 2 уверенных (score >= threshold) голоса с разными ключами текста.
+    Отдельно от vote() — режим crops считает его без голоса исходной метки
+    (backend/pipeline_crops.py), иначе почти каждая строка была бы diverged."""
+    key_of = key or _identity
+    confident = {key_of(text) for text, score in results.values() if text and score >= threshold}
+    return len(confident) >= 2
+
+
+def _identity(text: str) -> str:
+    return text
+
+
+def _winner_engine(
+    results: Dict[str, Tuple[str, float]],
+    winner_key: str,
+    key_of: Callable[[str], str],
+    preferred_model: Optional[str],
+) -> str:
+    """Чей текст писать для победившего ключа: предпочитаемого движка, если он
+    в согласной группе, иначе первого по порядку results."""
+    if preferred_model in results:
+        text = results[preferred_model][0]
+        if text and key_of(text) == winner_key:
+            return preferred_model
+    return next(eng for eng, (text, _) in results.items() if text and key_of(text) == winner_key)
 
 
 def _hint_engine(results: Dict[str, Tuple[str, float]], preferred_model: Optional[str]) -> str:

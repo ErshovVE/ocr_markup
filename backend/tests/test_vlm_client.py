@@ -87,6 +87,15 @@ def test_encode_image_downscales_when_longer_than_max_side():
     assert max(decoded.size) <= VLM_MAX_IMAGE_SIDE
 
 
+def test_encode_image_keeps_size_without_downscale():
+    wide_line = np.zeros((40, VLM_MAX_IMAGE_SIDE + 400, 3), dtype=np.uint8)
+
+    uri = vlm_client._encode_image(wide_line, downscale=False)
+
+    raw = base64.b64decode(uri.split(",", 1)[1])
+    assert Image.open(io.BytesIO(raw)).size == (VLM_MAX_IMAGE_SIDE + 400, 40)
+
+
 def test_downscale_page_caps_long_side_and_keeps_aspect():
     tall = np.zeros((VLM_MAX_IMAGE_SIDE * 2, VLM_MAX_IMAGE_SIDE, 3), dtype=np.uint8)
 

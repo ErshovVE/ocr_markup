@@ -106,13 +106,19 @@ def downscale_page(image) -> np.ndarray:
     return np.array(pil)
 
 
-def _encode_image(image) -> str:
+def _encode_image(image, downscale: bool = True) -> str:
     """np.ndarray | PIL.Image → data:image/webp;base64,...
 
     Страница обычно уже приведена к <= VLM_MAX_IMAGE_SIDE в pipeline_vlm
     (downscale_page); здесь тот же зажим остаётся как страховка (например,
-    для крупных region-кропов layout-стратегии, которые режутся из оригинала)."""
-    pil = Image.fromarray(downscale_page(image))
+    для крупных region-кропов layout-стратегии, которые режутся из оригинала).
+    downscale=False — для строки-кропа движка vlm_line: строка шириной 2400+ px
+    весит мало, а ужатие по длинной стороне мельчит её буквы."""
+    if downscale:
+        pil = Image.fromarray(downscale_page(image))
+    else:
+        pil = Image.fromarray(image) if isinstance(image, np.ndarray) else image
+        pil = pil.convert("RGB")
     buffer = io.BytesIO()
     # quality=95: картинка идёт на вход OCR-модели, агрессивное lossy-сжатие
     # текста (дефолт webp — 80) режет мелкие буквы; lossless раздул бы запрос.
@@ -162,16 +168,18 @@ def _error_reason(error: Exception) -> str:
     return type(error).__name__
 
 
-def chat(engine_id: str, prompt: str, image) -> str:
+def chat(engine_id: str, prompt: str, image, downscale: bool = True) -> str:
     """Один forward VLM по картинке. Возвращает текст ответа или ``""`` при
     любой ошибке (endpoint не задан, сеть, не-200, неожиданная форма ответа).
 
     На connect-ошибке / 5xx — одна повторная попытка; прочие ошибки (в т.ч.
     неожиданная форма ответа) сразу дают ``""``."""
-    return chat_with_reason(engine_id, prompt, image)[0]
+    return chat_with_reason(engine_id, prompt, image, downscale)[0]
 
 
-def chat_with_reason(engine_id: str, prompt: str, image) -> Tuple[str, Optional[str]]:
+def chat_with_reason(
+    engine_id: str, prompt: str, image, downscale: bool = True
+) -> Tuple[str, Optional[str]]:
     """Как chat(), но вместе с причиной неудачи: (текст, None) или ("", причина).
 
     Причина уходит в on_error задания (backend/pipeline_vlm.py) — раньше в UI
@@ -188,7 +196,10 @@ def chat_with_reason(engine_id: str, prompt: str, image) -> Tuple[str, Optional[
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": _encode_image(image)}},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": _encode_image(image, downscale)},
+                        },
                     ],
                 }
             ],

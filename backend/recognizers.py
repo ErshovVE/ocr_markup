@@ -1,5 +1,10 @@
 import logging
-from typing import List, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, List, Optional, Tuple
+
+from backend import vlm_client
+from backend.config import VLM_LINE_CONCURRENCY
+from backend.vlm_adapters import LINE_PROMPTS, parse_line_text
 
 LATIN_MODEL_SIZES = ("tiny", "small", "medium")
 DEFAULT_LATIN_MODEL_SIZE = "small"
@@ -9,10 +14,13 @@ logger = logging.getLogger(__name__)
 
 
 class _Engines:
-    """Ленивый холдер тяжёлых моделей распознавания (Paddle, Surya)"""
+    """Ленивый холдер тяжёлых моделей распознавания (Paddle, Surya, своя модель)"""
 
     _paddle_cyrillic = None
     _paddle_latin = {}
+    # Своя модель — только последняя запрошенная: (model_dir, предиктор). Новый
+    # custom_model_dir вытесняет прежний, а не копит модели в памяти процесса.
+    _custom: Optional[Tuple[str, object]] = None
     _foundation_predictor = None
     _recognition_predictor = None
 
@@ -37,6 +45,18 @@ class _Engines:
                 model_name=f"PP-OCRv6_{model_size}_rec", enable_mkldnn=False
             )
         return cls._paddle_latin[model_size]
+
+    @classmethod
+    def custom(cls, model_dir: str):
+        """Своя дообученная модель — экспорт PaddleOCR (tools/export_model.py:
+        inference.json/.pdiparams/.yml). Имя архитектуры и словарь PaddleX
+        берёт из inference.yml в model_dir. В кэше — одна модель (см. _custom)."""
+        if cls._custom is None or cls._custom[0] != model_dir:
+            from paddleocr import TextRecognition
+
+            cls._custom = None  # отпустить прежнюю модель до загрузки новой
+            cls._custom = (model_dir, TextRecognition(model_dir=model_dir, enable_mkldnn=False))
+        return cls._custom[1]
 
     @classmethod
     def surya_recognition(cls):
@@ -85,6 +105,48 @@ def recognize_paddle_latin_batch(
         logger.warning(f"Ошибка PaddleOCR PP-OCRv6: {e}")
         return [EMPTY_RESULT] * len(crops)
     return _paddle_batch(predictor, crops, "PaddleOCR PP-OCRv6")
+
+
+def recognize_custom_batch(crops: List, model_dir: str) -> List[Tuple[str, float]]:
+    """Распознавание своей дообученной моделью (экспорт PaddleOCR из model_dir) —
+    батчем, тем же путём, что у стандартных моделей PaddleOCR."""
+    try:
+        predictor = _Engines.custom(model_dir)
+    except Exception as e:
+        logger.warning(f"Ошибка своей модели ({model_dir}): {e}")
+        return [EMPTY_RESULT] * len(crops)
+    return _paddle_batch(predictor, crops, "Своя модель")
+
+
+def recognize_vlm_line_batch(
+    crops: List, engine_id: str, on_error: Optional[Callable[[str], None]] = None
+) -> List[Tuple[str, float]]:
+    """VLM читает каждую строку-кроп отдельным запросом (до VLM_LINE_CONCURRENCY
+    параллельно — llama-server/vLLM батчат их у себя). Порядок результатов =
+    порядок кропов.
+
+    Уверенности VLM не дают: score 1.0 при непустом тексте, иначе 0.0 — при
+    min_agree >= 2 vote() решает по совпадению текстов, score влияет только на
+    diverged и подсказку. Кроп не даунскейлится (downscale=False): это одна
+    строка, а не страница. Строки без ответа — одно сводное сообщение в
+    on_error на батч (недоступный endpoint иначе был бы виден только в логе)."""
+    try:
+        prompt = LINE_PROMPTS[engine_id]
+    except KeyError:
+        logger.warning(f"Неизвестный построчный VLM-движок: {engine_id}")
+        return [EMPTY_RESULT] * len(crops)
+
+    def read_line(crop) -> Tuple[str, Optional[str]]:
+        raw, reason = vlm_client.chat_with_reason(engine_id, prompt, crop, downscale=False)
+        return parse_line_text(raw), reason
+
+    with ThreadPoolExecutor(max_workers=max(1, min(VLM_LINE_CONCURRENCY, len(crops)))) as pool:
+        answers = list(pool.map(read_line, crops))
+
+    reasons = [reason for _, reason in answers if reason]
+    if reasons and on_error:
+        on_error(f"VLM {engine_id}: {len(reasons)} из {len(crops)} строк без ответа: {reasons[0]}")
+    return [(text, 1.0) if text else EMPTY_RESULT for text, _ in answers]
 
 
 def recognize_surya_batch(crops: List) -> List[Tuple[str, float]]:

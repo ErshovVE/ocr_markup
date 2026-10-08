@@ -44,9 +44,7 @@ def test_run_engines_with_timeout_works_without_on_error_callback():
         time.sleep(0.3)
         return "late", 0.9
 
-    results = _run_engines_with_timeout(
-        {"slow": (slow, ())}, timeout=0.05, source_label="crop-2"
-    )
+    results = _run_engines_with_timeout({"slow": (slow, ())}, timeout=0.05, source_label="crop-2")
 
     assert results["slow"] == ("", 0.0)
 
@@ -113,3 +111,28 @@ def test_hung_detector_skips_page_and_reports_error(monkeypatch):
     assert boxes == []
     assert any("detector" in e and "scan.png" in e for e in errors)
     pipeline.reset_engine_guard()
+
+
+def test_run_engines_with_timeout_per_engine_budget():
+    def hang():
+        time.sleep(1.0)
+        return "late", 0.9
+
+    def slow_vlm():
+        time.sleep(0.15)
+        return "vlm", 1.0
+
+    errors = []
+    started = time.monotonic()
+    results = _run_engines_with_timeout(
+        # длинный бюджет первым по порядку — короткий всё равно не ждёт его
+        {"vlm": (slow_vlm, ()), "stuck": (hang, ())},
+        timeout=0.05,
+        source_label="test",
+        on_error=errors.append,
+        engine_timeouts={"vlm": 0.5},
+    )
+
+    assert results == {"vlm": ("vlm", 1.0), "stuck": ("", 0.0)}
+    assert len(errors) == 1 and "0.05" in errors[0] and "stuck" in errors[0]
+    assert time.monotonic() - started < 0.4

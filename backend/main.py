@@ -12,6 +12,7 @@ from backend.config import (
     DEFAULT_MIN_AGREE,
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_VLM_MIN_AGREE,
+    LINE_VLM_ENGINES,
     RECOGNITION_ENGINES,
     VLM_ENGINES,
 )
@@ -19,11 +20,18 @@ from backend.degrade import DEFAULT_MIN_CONTRAST, DegradeOptions, effects_errors
 from backend.detector import DEFAULT_DETECTOR_ENGINE, DETECTOR_ENGINES
 from backend.jobs import cancel_job, get_active_job_id, get_job, get_status_snapshot, start_job
 from backend.labels import load_alphabet
+from backend.pipeline import RecognitionOptions
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE, LATIN_MODEL_SIZES
+from backend.text_keys import DEFAULT_VOTE_KEY, VOTE_KEYS
 
 # Литералы в RunRequest дублируют эти кортежи ради OpenAPI-схемы — ловим дрейф.
 assert set(LATIN_MODEL_SIZES) == {"tiny", "small", "medium"}
 assert set(DETECTOR_ENGINES) == {"paddle", "surya", "tesseract"}
+assert set(VOTE_KEYS) == {"exact", "normalized", "no_spaces"}
+
+# Файл, по которому экспорт своей модели PaddleOCR (tools/export_model.py)
+# узнаётся в custom_model_dir: из него PaddleX берёт архитектуру и словарь.
+_CUSTOM_MODEL_MANIFEST = "inference.yml"
 
 # Ключ детектора в models_status.get_status() для каждого detector_engine.
 # "tesseract" не включён отдельно — он уже проверяется как движок
@@ -60,7 +68,8 @@ def _readiness_warnings(req: "RunRequest") -> List[str]:
     Считается ДО start_job (см. run()): медленная проверка задерживает старт
     job'а, а не отрывается от HTTP-ответа. VLM-пинги в get_status конкурентны
     и кэшируются (backend/models_status.py), поэтому это дёшево."""
-    status = models_status.get_status(include_vlm=req.mode == "vlm")
+    uses_line_vlm = req.mode != "vlm" and "vlm_line" in req.engines
+    status = models_status.get_status(include_vlm=req.mode == "vlm" or uses_line_vlm)
     warnings: List[str] = []
 
     def check(key: str, label: str) -> None:
@@ -86,8 +95,10 @@ def _readiness_warnings(req: "RunRequest") -> List[str]:
         check("surya", "SuryaOCR (распознавание)")
     if "tesseract" in req.engines:
         check("tesseract", "Tesseract")
+    if uses_line_vlm:
+        check(f"vlm_{req.line_vlm_engine}", f"VLM {req.line_vlm_engine} (построчно)")
     det_key = _DETECTOR_STATUS_KEYS.get(req.detector_engine)
-    if det_key:
+    if det_key and req.mode != "crops":  # в crops детекции нет
         check(det_key, "Детектор строк")
     return warnings
 
@@ -138,8 +149,10 @@ class RunRequest(BaseModel):
     min_agree: int = Field(DEFAULT_MIN_AGREE, ge=1)
     # mode="consensus" (по умолчанию) — построчный консенсус; mode="vlm" —
     # полностраничный VLM-парсинг (backend/pipeline_vlm.py). При mode="vlm"
-    # engines/min_agree/detector_engine/lang игнорируются.
-    mode: Literal["consensus", "vlm"] = "consensus"
+    # engines/min_agree/detector_engine/lang игнорируются. mode="crops" —
+    # чистка меток готовых кропов (backend/pipeline_crops.py): input_dir —
+    # корень кропов, label_file — файл меток «путь<TAB>метка[<TAB>w<TAB>h]».
+    mode: Literal["consensus", "vlm", "crops"] = "consensus"
     vlm_engines: List[str] = Field(default_factory=list)
     vlm_min_agree: int = Field(DEFAULT_VLM_MIN_AGREE, ge=1)
     iou_threshold: float = Field(DEFAULT_IOU_THRESHOLD, gt=0.0, le=1.0)
@@ -151,6 +164,25 @@ class RunRequest(BaseModel):
     degrade_seed: int = 0
     degrade_min_contrast: float = Field(DEFAULT_MIN_CONTRAST, ge=0.0)
     degrade_effects: Optional[Dict[str, List[Dict[str, Any]]]] = None
+    # mode="crops": файл меток датасета (пути кропов — относительно input_dir).
+    label_file: Optional[str] = None
+    # mode="crops": исходная метка — ещё один голос в vote() (min_agree до len(engines)+1).
+    label_votes: bool = False
+    # Движок "custom": каталог экспорта своей модели PaddleOCR (с inference.yml).
+    custom_model_dir: Optional[str] = None
+    # Движок "vlm_line": какой VLM читает строку-кроп (config.LINE_VLM_ENGINES).
+    line_vlm_engine: Optional[str] = None
+    # Ключ сравнения текстов движков в vote() (backend/text_keys.py):
+    # exact — посимвольно, normalized — без типографики/лишних пробелов/ё,
+    # no_spaces — ещё и без пробелов. consensus и crops.
+    vote_key: Literal["exact", "normalized", "no_spaces"] = DEFAULT_VOTE_KEY
+
+    def recognition_options(self) -> RecognitionOptions:
+        return RecognitionOptions(
+            custom_model_dir=self.custom_model_dir,
+            line_vlm_engine=self.line_vlm_engine,
+            vote_key=self.vote_key,
+        )
 
     def degrade_options(self) -> Optional[DegradeOptions]:
         if self.degrade_page_share <= 0:
@@ -171,7 +203,7 @@ class RunRequest(BaseModel):
                 "pdf_ocr_fallback=false без extract_pdf_text_layer пропустил бы все страницы PDF"
             )
         if self.degrade_page_share > 0:
-            if self.mode == "vlm" or not self.extract_pdf_text_layer:
+            if self.mode != "consensus" or not self.extract_pdf_text_layer:
                 raise ValueError(
                     "degrade_page_share > 0 работает только с текстовым слоем PDF "
                     "(mode=consensus, extract_pdf_text_layer=true)"
@@ -198,17 +230,32 @@ class RunRequest(BaseModel):
                     f"engines должен быть непустым подмножеством {RECOGNITION_ENGINES}: "
                     f"{self.engines}"
                 )
-            if not (1 <= self.min_agree <= len(self.engines)):
+            voters = len(self.engines) + (1 if self.label_votes else 0)
+            if not (1 <= self.min_agree <= voters):
                 raise ValueError(
-                    f"min_agree должен быть от 1 до len(engines)={len(self.engines)}: "
-                    f"{self.min_agree}"
+                    f"min_agree должен быть от 1 до числа голосов {voters} "
+                    f"(engines{' + метка' if self.label_votes else ''}): {self.min_agree}"
                 )
             if self.preferred_model is not None and self.preferred_model not in self.engines:
                 raise ValueError(
                     f"preferred_model должен быть одним из engines {self.engines}: "
                     f"{self.preferred_model}"
                 )
+            self._check_extra_engines()
+        if self.mode == "crops" and not self.label_file:
+            raise ValueError("mode=crops требует label_file")
+        if self.label_votes and self.mode != "crops":
+            raise ValueError("label_votes работает только с mode=crops")
         return self
+
+    def _check_extra_engines(self) -> None:
+        if "custom" in self.engines and not self.custom_model_dir:
+            raise ValueError("движок custom требует custom_model_dir")
+        if "vlm_line" in self.engines and self.line_vlm_engine not in LINE_VLM_ENGINES:
+            raise ValueError(
+                f"движок vlm_line требует line_vlm_engine из {LINE_VLM_ENGINES}: "
+                f"{self.line_vlm_engine}"
+            )
 
 
 class PrepareRequest(BaseModel):
@@ -245,6 +292,23 @@ class ModelStatusEntry(BaseModel):
     detail: Optional[str] = None
 
 
+def _check_crops_paths(req: RunRequest) -> None:
+    """Пути режима crops и движка custom: внутри OCR_DATA_ROOT и существуют."""
+    if req.mode == "crops":
+        _reject_outside_data_root(req.label_file, "label_file")
+        if not os.path.isfile(req.label_file):
+            raise HTTPException(400, f"label_file не найден: {req.label_file}")
+    if req.mode != "vlm" and "custom" in req.engines:
+        _reject_outside_data_root(req.custom_model_dir, "custom_model_dir")
+        manifest = os.path.join(req.custom_model_dir, _CUSTOM_MODEL_MANIFEST)
+        if not os.path.isfile(manifest):
+            raise HTTPException(
+                400,
+                f"custom_model_dir без {_CUSTOM_MODEL_MANIFEST} (нужен экспорт "
+                f"tools/export_model.py): {req.custom_model_dir}",
+            )
+
+
 @app.post("/run", response_model=RunResponse, responses={400: {}, 409: {}})
 def run(req: RunRequest):
     _reject_outside_data_root(req.input_dir, "input_dir")
@@ -260,6 +324,7 @@ def run(req: RunRequest):
             alphabet = load_alphabet(req.alphabet_file)
         except (OSError, UnicodeDecodeError, ValueError) as e:
             raise HTTPException(400, f"alphabet_file не читается: {e}") from e
+    _check_crops_paths(req)
     try:
         os.makedirs(req.output_dir, exist_ok=True)
     except OSError as e:
@@ -290,6 +355,9 @@ def run(req: RunRequest):
             normalize_labels=req.normalize_labels,
             alphabet=alphabet,
             degrade=req.degrade_options(),
+            label_file=req.label_file,
+            label_votes=req.label_votes,
+            options=req.recognition_options(),
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e

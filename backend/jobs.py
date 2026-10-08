@@ -17,7 +17,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, FrozenSet, List, Literal, Optional
 
-from backend import pipeline, pipeline_vlm
+from backend import pipeline, pipeline_crops, pipeline_vlm
 from backend.config import (
     DEFAULT_ENGINES,
     DEFAULT_IOU_THRESHOLD,
@@ -26,6 +26,7 @@ from backend.config import (
 )
 from backend.degrade import DegradeOptions
 from backend.detector import DEFAULT_DETECTOR_ENGINE
+from backend.pipeline import RecognitionOptions
 from backend.recognizers import DEFAULT_LATIN_MODEL_SIZE
 
 JobStatus = Literal["running", "done", "error", "cancelled"]
@@ -143,6 +144,9 @@ def _run_job(
     normalize_labels: bool = False,
     alphabet: Optional[FrozenSet[str]] = None,
     degrade: Optional[DegradeOptions] = None,
+    label_file: Optional[str] = None,
+    label_votes: bool = False,
+    options: Optional[RecognitionOptions] = None,
 ):
     global _active_job_id
     state = _jobs[job_id]
@@ -186,6 +190,28 @@ def _run_job(
                 normalize_labels=normalize_labels,
                 alphabet=alphabet,
             )
+        elif mode == "crops":
+            good_count, needs_review_count = pipeline_crops.run(
+                label_file,
+                input_dir,
+                output_dir,
+                threshold,
+                preferred_model,
+                engines=engines,
+                min_agree=min_agree,
+                options=options,
+                label_votes=label_votes,
+                lang=lang,
+                latin_model_size=latin_model_size,
+                on_found=on_found,
+                on_file_done=on_file_done,
+                on_line_done=on_line_done,
+                on_error=on_error,
+                should_cancel=should_cancel,
+                append_crop_size=append_crop_size,
+                normalize_labels=normalize_labels,
+                alphabet=alphabet,
+            )
         else:
             good_count, needs_review_count = pipeline.run(
                 input_dir,
@@ -208,6 +234,7 @@ def _run_job(
                 normalize_labels=normalize_labels,
                 alphabet=alphabet,
                 degrade=degrade,
+                options=options,
             )
         final_status = "cancelled" if state.cancel_event.is_set() else "done"
         state.result = {
@@ -250,6 +277,9 @@ def start_job(
     normalize_labels: bool = False,
     alphabet: Optional[FrozenSet[str]] = None,
     degrade: Optional[DegradeOptions] = None,
+    label_file: Optional[str] = None,
+    label_votes: bool = False,
+    options: Optional[RecognitionOptions] = None,
 ) -> str:
     """Запускает pipeline.run / pipeline_vlm.run в фоновом потоке и сразу
     возвращает job_id.
@@ -259,6 +289,9 @@ def start_job(
     полностраничный VLM-парсинг (vlm_engines/vlm_min_agree/iou_threshold, см.
     backend/pipeline_vlm.py). JobState/трекер общий для обоих путей.
     degrade — порча страниц PDF с текстовым слоем (только consensus, см. backend/degrade.py).
+    mode="crops" — чистка меток готовых кропов (backend/pipeline_crops.py):
+    input_dir — корень кропов, label_file — файл меток, label_votes — метка как
+    ещё один голос. options — модели custom/vlm_line и vote_key (consensus и crops).
 
     Поднимает RuntimeError, если уже выполняется другое задание — вызывающий
     код (main.py) должен превращать это в HTTP 409.
@@ -295,6 +328,8 @@ def start_job(
             alphabet,
             degrade,
         ),
+        # Новые параметры — по имени: позиционный хвост выше легко перепутать.
+        kwargs={"label_file": label_file, "label_votes": label_votes, "options": options},
         daemon=True,
     )
     thread.start()

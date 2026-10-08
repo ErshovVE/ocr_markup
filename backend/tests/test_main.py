@@ -191,3 +191,149 @@ def test_run_rejects_missing_or_bad_alphabet(client, input_dir, tmp_path, monkey
     response = client.post("/run", json=payload)
     assert response.status_code == 400
     assert "alphabet_file" in response.json()["detail"]
+
+
+@pytest.fixture
+def label_file(tmp_path):
+    path = tmp_path / "labels.txt"
+    path.write_text("crops/0/a.png\tметка\n", encoding="utf-8")
+    return str(path)
+
+
+@pytest.fixture
+def model_dir(tmp_path):
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "inference.yml").write_text("Global: {}\n", encoding="utf-8")
+    return str(d)
+
+
+@pytest.mark.parametrize(
+    "payload_extra",
+    [
+        {"mode": "crops"},
+        {"engines": ["custom", "surya"]},
+        {"engines": ["vlm_line", "surya"]},
+        {"engines": ["vlm_line", "surya"], "line_vlm_engine": "hunyuan_ocr"},
+        {"engines": ["surya", "label"]},
+        {"label_votes": True},
+        {"vote_key": "bogus"},
+        {"mode": "crops", "label_file": "x", "engines": ["surya"], "min_agree": 2},
+        {"mode": "crops", "label_file": "x", "degrade_page_share": 0.5},
+    ],
+)
+def test_run_rejects_bad_crops_and_engine_combos(client, input_dir, tmp_path, payload_extra):
+    body = {"input_dir": input_dir, "output_dir": str(tmp_path / "o"), **payload_extra}
+    assert client.post("/run", json=body).status_code == 422
+
+
+def test_run_crops_label_votes_allows_min_agree_above_engines(
+    client, input_dir, tmp_path, monkeypatch, label_file
+):
+    _capture_start_job(monkeypatch)
+    body = {
+        "input_dir": input_dir,
+        "output_dir": str(tmp_path / "o"),
+        "mode": "crops",
+        "label_file": label_file,
+        "engines": ["surya"],
+        "min_agree": 2,
+        "label_votes": True,
+    }
+    assert client.post("/run", json=body).status_code == 200
+
+
+def test_run_crops_rejects_missing_label_file(client, input_dir, tmp_path, monkeypatch):
+    _capture_start_job(monkeypatch)
+    body = {
+        "input_dir": input_dir,
+        "output_dir": str(tmp_path / "o"),
+        "mode": "crops",
+        "label_file": str(tmp_path / "nope.txt"),
+    }
+    response = client.post("/run", json=body)
+    assert response.status_code == 400
+    assert "label_file" in response.json()["detail"]
+
+
+def test_run_custom_requires_inference_yml(client, input_dir, tmp_path, monkeypatch):
+    _capture_start_job(monkeypatch)
+    empty_dir = tmp_path / "empty_model"
+    empty_dir.mkdir()
+    body = {
+        "input_dir": input_dir,
+        "output_dir": str(tmp_path / "o"),
+        "engines": ["custom", "surya"],
+        "custom_model_dir": str(empty_dir),
+    }
+    response = client.post("/run", json=body)
+    assert response.status_code == 400
+    assert "inference.yml" in response.json()["detail"]
+
+
+def test_run_passes_crops_fields_to_job(
+    client, input_dir, tmp_path, monkeypatch, label_file, model_dir
+):
+    seen = _capture_start_job(monkeypatch)
+    body = {
+        "input_dir": input_dir,
+        "output_dir": str(tmp_path / "o"),
+        "mode": "crops",
+        "label_file": label_file,
+        "engines": ["custom", "surya", "vlm_line"],
+        "min_agree": 2,
+        "custom_model_dir": model_dir,
+        "line_vlm_engine": "glm_ocr",
+        "vote_key": "no_spaces",
+        "label_votes": True,
+    }
+    assert client.post("/run", json=body).status_code == 200
+    assert seen["label_file"] == label_file
+    assert seen["label_votes"] is True
+    options = seen["options"]
+    assert (options.custom_model_dir, options.line_vlm_engine, options.vote_key) == (
+        model_dir,
+        "glm_ocr",
+        "no_spaces",
+    )
+
+
+def test_run_vlm_line_readiness_warning(client, input_dir, tmp_path, monkeypatch):
+    class _State:
+        status = "error"
+        detail = "нет ответа"
+
+    calls = []
+
+    def fake_status(include_vlm=True):
+        calls.append(include_vlm)
+        return {"vlm_glm_ocr": _State()}
+
+    monkeypatch.setattr(main.models_status, "get_status", fake_status)
+    _capture_start_job(monkeypatch)
+    body = {
+        "input_dir": input_dir,
+        "output_dir": str(tmp_path / "o"),
+        "engines": ["vlm_line", "surya"],
+        "line_vlm_engine": "glm_ocr",
+    }
+    response = client.post("/run", json=body)
+    assert response.status_code == 200
+    assert calls == [True]
+    assert any("glm_ocr" in w for w in response.json()["warnings"])
+
+
+def test_default_engines_unchanged(client, input_dir, tmp_path, monkeypatch):
+    import inspect
+
+    seen = {}
+
+    def fake_start_job(*a, **k):
+        # по имени параметра, а не по позиции — переживёт перестановку аргументов
+        seen.update(inspect.signature(main.jobs.start_job).bind(*a, **k).arguments)
+        return "job-1"
+
+    monkeypatch.setattr(main, "start_job", fake_start_job)
+    body = {"input_dir": input_dir, "output_dir": str(tmp_path / "o")}
+    assert client.post("/run", json=body).status_code == 200
+    assert seen["engines"] == ["paddle", "surya", "tesseract"]

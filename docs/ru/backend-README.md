@@ -94,7 +94,7 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8756
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "pdf_ocr_fallback": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int, "append_crop_size": bool, "normalize_labels": bool, "alphabet_file": str | null, "degrade_page_share": float (0..1), "degrade_seed": int, "degrade_min_contrast": float, "degrade_effects": {...} | null}` → `{"job_id": str, "warnings": [str]}` (все три по умолчанию выключены, оба режима: `append_crop_size` — дописывать в каждую строку `good.txt`/`needs_review.txt` ширину и высоту кропа в пикселях — `crop\ttext\tw\th`; `normalize_labels` — в метке типографские варианты заменяются на символы словаря: среднее тире → длинное, `“ ” „ ‟` → `"`, `‘ ’ ‚ ‛` → `'`, картинка не меняется (`backend/labels.py`, общий с балансировщиком doc-generator); `alphabet_file` — словарь модели, по символу на строку: строка `good` с символами вне него уходит в `needs_review.txt`; 400, если файла нет, он не читается или лежит вне `OCR_DATA_ROOT`); 400, если `engines` пуст/содержит неизвестный движок или `min_agree` вне `[1, len(engines)]`; 409, если уже выполняется другое задание (одновременно поддерживается только одно, см. backend/jobs.py). `warnings` — движки из `engines` (и детектор), чья модель ещё не готова (`not_checked`/`checking`/`error` в `/models/status`) — задание всё равно стартует, предупреждение просто объясняет, почему первые строки могут "зависнуть" на скачивании весов
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float, "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "pdf_ocr_fallback": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract" | "custom" | "vlm_line", ...], "min_agree": int, "vote_key": "exact" | "normalized" | "no_spaces", "mode": "consensus" | "vlm" | "crops", "label_file": str | null, "label_votes": bool, "custom_model_dir": str | null, "line_vlm_engine": str | null, "append_crop_size": bool, "normalize_labels": bool, "alphabet_file": str | null, "degrade_page_share": float (0..1), "degrade_seed": int, "degrade_min_contrast": float, "degrade_effects": {...} | null}` → `{"job_id": str, "warnings": [str]}` (все три по умолчанию выключены, оба режима: `append_crop_size` — дописывать в каждую строку `good.txt`/`needs_review.txt` ширину и высоту кропа в пикселях — `crop\ttext\tw\th`; `normalize_labels` — в метке типографские варианты заменяются на символы словаря: среднее тире → длинное, `“ ” „ ‟` → `"`, `‘ ’ ‚ ‛` → `'`, картинка не меняется (`backend/labels.py`, общий с балансировщиком doc-generator); `alphabet_file` — словарь модели, по символу на строку: строка `good` с символами вне него уходит в `needs_review.txt`; 400, если файла нет, он не читается или лежит вне `OCR_DATA_ROOT`); 400, если `engines` пуст/содержит неизвестный движок или `min_agree` вне `[1, len(engines)]`; 409, если уже выполняется другое задание (одновременно поддерживается только одно, см. backend/jobs.py). `warnings` — движки из `engines` (и детектор), чья модель ещё не готова (`not_checked`/`checking`/`error` в `/models/status`) — задание всё равно стартует, предупреждение просто объясняет, почему первые строки могут "зависнуть" на скачивании весов. `mode="crops"`, `custom`/`vlm_line`, `vote_key`, `label_votes` — см. [Режим готовых кропов](#режим-готовых-кропов-modecrops--чистка-меток-существующего-датасета)
 - `GET /jobs/active` → `{"job_id": str | null}` — id текущего выполняющегося задания (или null); нужен фронтенду, чтобы восстановить трекер прогресса после перезагрузки страницы
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — трекер прогресса обновляется построчно по ходу выполнения задания (см. backend/jobs.py), а не только по завершении файла целиком (распознавание одной строки Surya может занимать до ~20с); `diverged_count` — строки, где 2+ движка независимо уверены (score >= threshold), но разошлись в тексте (см. backend/consensus.py); `error_count`/`errors` — файлы/строки, упавшие с исключением или таймаутом движка (см. `ENGINE_CALL_TIMEOUT_SECONDS` ниже) — `error_count` растёт без ограничения, `errors` хранит только последние `MAX_STORED_ERRORS` (по умолчанию 50) сообщений
 - `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — неизвестный `job_id`, 409 — задание уже не выполняется. Отмена кооперативная: поток нельзя убить напрямую, поэтому задание останавливается на ближайшей проверке между файлами/страницами/строками, не теряя уже записанное; после остановки `/status` покажет `"status": "cancelled"`
@@ -336,3 +336,74 @@ confidence не дают). `diverged` проставляется, когда ≥
   используется (для PDF с текстовым слоем берите `mode="consensus"`).
 - Стратегия `layout` даёт одну строку на строку, найденную детектором.
 - Таблицы/формулы кладутся как обычные строки текста (датасет построчный).
+
+## Режим готовых кропов (`mode="crops"`) — чистка меток существующего датасета
+
+Без детекции и без новых кропов: на входе готовый **файл меток** датасета
+(`путь_кропа\tметка[\tw\th]`, пути — относительно `input_dir`) и корень кропов.
+Каждый кроп читается с диска, распознаётся выбранными движками и идёт в голосование
+(`backend/pipeline_crops.py`). Выход — `good.txt` / `needs_review.txt` /
+`debug.jsonl` в `output_dir` с **теми же путями кропов**, что во входном файле:
+`good.txt` — исправленные метки существующих кропов, `needs_review.txt` — строки без
+согласия (в обучение не идут). Как и порча страниц — только API, без UI.
+
+Пути кропов в выходе остаются **относительно `input_dir`** (корня кропов), а не
+`output_dir` — рядом с выходными файлами кропов нет. Чтобы разобрать
+`needs_review.txt` в ручной разметке, скопируйте его в корень кропов как `rec.txt`
+(формат тот же) и откройте корень кропов как рабочую папку.
+
+```json
+POST /run
+{
+  "mode": "crops",
+  "input_dir": "/data/stroyinf",
+  "label_file": "/data/stroyinf/review_labels.txt",
+  "output_dir": "/data/stroyinf_clean",
+  "engines": ["custom", "surya", "vlm_line"],
+  "min_agree": 2,
+  "custom_model_dir": "/data/models/ru_rec/inference",
+  "line_vlm_engine": "glm_ocr",
+  "vote_key": "no_spaces",
+  "label_votes": false
+}
+```
+
+### Поля
+
+- `label_file` — обязателен при `mode="crops"`; 400, если файла нет или он вне
+  `OCR_DATA_ROOT`. Строки без таба попадают в ошибки `/status` и пропускаются; путь
+  кропа за пределами `input_dir` (`../`, чужой абсолютный путь) или нечитаемая
+  картинка — ошибка, строка не пишется никуда.
+- `engines` — теперь ещё `custom` и `vlm_line` (оба работают и в `mode="consensus"`):
+  - `custom` — наша дообученная модель, экспорт PaddleOCR (`tools/export_model.py` →
+    `inference.json/.pdiparams/.yml`) из `custom_model_dir`; 422 без поля, 400, если в
+    каталоге нет `inference.yml`.
+  - `vlm_line` — VLM читает одну строку-кроп на запрос (до 8 параллельно, кроп не
+    даунскейлится) через тот же llama.cpp endpoint (`VLM_ENDPOINT`); `line_vlm_engine` ∈
+    `glm_ocr`, `dots_ocr`, `unlimited_ocr`, `paddleocr_vl` (иначе 422). Score — `1.0` при
+    непустом ответе, иначе `0.0`. У `vlm_line` свой бюджет времени батча —
+    `VLM_REQUEST_TIMEOUT_SECONDS` на строку; остальные движки батча сохраняют
+    `ENGINE_CALL_TIMEOUT_SECONDS` на строку и его не ждут. Подойдёт и vLLM, если `--served-model-name`
+    совпадает с `served_model_name` из `backend/config.py::VLM_ENGINE_META` (например,
+    `glm-ocr`). У `paddleocr_vl` промпт `"OCR:"` — проверьте его на паре кропов до
+    долгого прогона.
+- `vote_key` — как сравниваются тексты движков в `vote()` (`backend/text_keys.py`), в
+  том числе в `mode="consensus"`: `exact` (по умолчанию, посимвольно), `normalized`
+  (типографские варианты как в `normalize_labels`, схлопнутые пробелы, `ё`→`е`),
+  `no_spaces` (`normalized` без пробелов: `2 .5 .1` = `2.5.1`). Ключ только группирует
+  голоса — пишется собственный текст движка-победителя (`preferred_model`, если он в
+  согласной группе, иначе первого согласного движка).
+- `label_votes` — исходная метка как ещё один голос (`label`, score 1.0); тогда
+  `min_agree` может быть до `len(engines) + 1`. Только с `mode="crops"` (иначе 422).
+  Голос метки не учитывается в `diverged` (иначе почти каждая строка — а на вход
+  идут как раз расхождения модели с меткой — считалась бы «diverged»).
+- `degrade_page_share > 0` в этом режиме — 422; `detector_engine` и поля PDF игнорируются.
+
+Прогресс: «документ» в `/status` — батч из `RECOGNITION_BATCH_SIZE` строк. Записи
+`debug.jsonl` дополнительно хранят исходную метку (`"label"`). Файл меток читается
+потоково (BOM UTF-8 допустим), поэтому его размер не упирается в память. Resume нет —
+прерванное задание перезапускается с начала.
+
+Задуманный каскад: прогнать нашу модель по всему датасету отдельно (Kaggle-ноутбук),
+оставить строки, где она совпала с меткой, а сюда отправить только расхождения с
+`custom` + `surya` + `vlm_line`, 2 из 3.

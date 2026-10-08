@@ -4,9 +4,11 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 PDF_EXTENSIONS = (".pdf",)
 DEFAULT_SCORE_THRESHOLD = 0.95
 # Движки распознавания, доступные для консенсуса (см. backend/recognizers.py) —
-# по умолчанию используются все 3 с требованием совпадения любых 2 ("2 из 3").
-RECOGNITION_ENGINES = ("paddle", "surya", "tesseract")
-DEFAULT_ENGINES = RECOGNITION_ENGINES
+# по умолчанию используются 3 классических с требованием совпадения любых 2
+# ("2 из 3"). custom — своя дообученная модель (экспорт PaddleOCR, нужен
+# custom_model_dir), vlm_line — VLM читает одну строку-кроп (нужен line_vlm_engine).
+RECOGNITION_ENGINES = ("paddle", "surya", "tesseract", "custom", "vlm_line")
+DEFAULT_ENGINES = ("paddle", "surya", "tesseract")
 DEFAULT_MIN_AGREE = 2
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8756
@@ -103,6 +105,11 @@ VLM_MAX_OUTPUT_TOKENS = 8192
 DEFAULT_VLM_MIN_AGREE = 1
 # Порог IoU, при котором боксы двух движков считаются одной строкой.
 DEFAULT_IOU_THRESHOLD = 0.5
+# VLM-движки, умеющие читать одну строку-кроп (движок "vlm_line" консенсуса,
+# промпты — backend/vlm_adapters.py::LINE_PROMPTS). hunyuan_ocr — только spotting.
+LINE_VLM_ENGINES = ("glm_ocr", "dots_ocr", "unlimited_ocr", "paddleocr_vl")
+# Параллельных запросов vlm_line на батч строк — llama-server/vLLM батчат сами.
+VLM_LINE_CONCURRENCY = 8
 # Даунскейл самой длинной стороны страницы перед base64 — иначе плотная A4 в
 # высоком DPI раздувает тело HTTP-запроса на десятки мегабайт.
 VLM_MAX_IMAGE_SIDE = 2048

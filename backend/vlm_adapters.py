@@ -44,6 +44,19 @@ PROMPTS = {
     "unlimited_ocr": "Free OCR.",
 }
 
+# Промпты движка "vlm_line" консенсуса (backend/recognizers.py::
+# recognize_vlm_line_batch): модель читает одну строку-кроп. Layout-движки —
+# те же промпты, что выше; PaddleOCR-VL — "OCR:" (задача распознавания из
+# карточки модели, не Spotting). "OCR:" проверить на живой модели перед
+# прогоном: если ответ — Spotting-разметка, убрать paddleocr_vl из
+# backend/config.py::LINE_VLM_ENGINES.
+LINE_PROMPTS = {
+    "glm_ocr": PROMPTS["glm_ocr"],
+    "dots_ocr": PROMPTS["dots_ocr"],
+    "unlimited_ocr": PROMPTS["unlimited_ocr"],
+    "paddleocr_vl": "OCR:",
+}
+
 # Минимальный LaTeX→Unicode (перенос идеи из Folio-OCR latex_unicode.json —
 # полную таблицу тянуть не стали, VLM-markdown у нас кладётся построчно).
 _LATEX_UNICODE = {
@@ -178,6 +191,16 @@ def parse_region_text(raw: str) -> List[str]:
     только текст, без боксов (их даёт backend/vlm_layout.py): список непустых строк."""
     cleaned = postprocess_text(raw)
     return [line.strip() for line in cleaned.splitlines() if line.strip()]
+
+
+def parse_line_text(raw: str) -> str:
+    """Ответ VLM на одну строку-кроп → один текст: строки ответа через пробел
+    (модель иногда переносит длинную строку), пустой/битый ответ → ""."""
+    try:
+        return " ".join(parse_region_text(raw))
+    except Exception as e:  # noqa: BLE001 — как parse()
+        logger.warning("Ошибка парсера строки VLM: %s", e)
+        return ""
 
 
 _NATIVE_PARSERS = {

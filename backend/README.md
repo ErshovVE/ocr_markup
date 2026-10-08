@@ -99,7 +99,7 @@ outside it. Docker Compose sets `OCR_DATA_ROOT=/data` and binds every port to
 
 ## API
 
-- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float (0..1), "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "pdf_ocr_fallback": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract", ...], "min_agree": int, "append_crop_size": bool, "normalize_labels": bool, "alphabet_file": str | null, "degrade_page_share": float (0..1), "degrade_seed": int, "degrade_min_contrast": float, "degrade_effects": {...} | null}` → `{"job_id": str, "warnings": [str]}` (all three default to off, both modes: `append_crop_size` appends the crop width and height in pixels to every `good.txt`/`needs_review.txt` line — `crop\ttext\tw\th`; `normalize_labels` maps typographic variants in the label to dictionary symbols — en dash → em dash, `“ ” „ ‟` → `"`, `‘ ’ ‚ ‛` → `'`, the image is unchanged (`backend/labels.py`, shared with the doc-generator balancer); `alphabet_file` — the model dictionary, one symbol per line: a `good` line with symbols outside it goes to `needs_review.txt`; 400 if the file is missing, unreadable or outside `OCR_DATA_ROOT`); **422** if a field is out of range or the cross-field checks fail (`engines` empty/unknown, `min_agree` outside `[1, len(engines)]`, `preferred_model` not in `engines`, `iou_threshold` outside `(0, 1]`, …); 400 if `input_dir` doesn't exist, `output_dir` isn't writable, or a path is outside `OCR_DATA_ROOT`; 409 if another job is already running (only one is supported at a time, see backend/jobs.py). `warnings` — engines from `engines` (and the detector) whose model isn't ready yet (`not_checked`/`checking`/`error` in `/models/status`); the job starts anyway. Readiness is checked **before** the job is spawned, so a slow check delays the response rather than detaching from it.
+- `POST /run` — `{"input_dir": str, "output_dir": str, "score_threshold": float (0..1), "preferred_model": str | null, "lang": "ru" | "latin", "latin_model_size": "tiny" | "small" | "medium", "extract_pdf_text_layer": bool, "pdf_ocr_fallback": bool, "detector_engine": "paddle" | "surya" | "tesseract", "engines": ["paddle" | "surya" | "tesseract" | "custom" | "vlm_line", ...], "min_agree": int, "vote_key": "exact" | "normalized" | "no_spaces", "mode": "consensus" | "vlm" | "crops", "label_file": str | null, "label_votes": bool, "custom_model_dir": str | null, "line_vlm_engine": str | null, "append_crop_size": bool, "normalize_labels": bool, "alphabet_file": str | null, "degrade_page_share": float (0..1), "degrade_seed": int, "degrade_min_contrast": float, "degrade_effects": {...} | null}` → `{"job_id": str, "warnings": [str]}` (all three default to off, both modes: `append_crop_size` appends the crop width and height in pixels to every `good.txt`/`needs_review.txt` line — `crop\ttext\tw\th`; `normalize_labels` maps typographic variants in the label to dictionary symbols — en dash → em dash, `“ ” „ ‟` → `"`, `‘ ’ ‚ ‛` → `'`, the image is unchanged (`backend/labels.py`, shared with the doc-generator balancer); `alphabet_file` — the model dictionary, one symbol per line: a `good` line with symbols outside it goes to `needs_review.txt`; 400 if the file is missing, unreadable or outside `OCR_DATA_ROOT`); **422** if a field is out of range or the cross-field checks fail (`engines` empty/unknown, `min_agree` outside `[1, len(engines)]`, `preferred_model` not in `engines`, `iou_threshold` outside `(0, 1]`, …); 400 if `input_dir` doesn't exist, `output_dir` isn't writable, or a path is outside `OCR_DATA_ROOT`; 409 if another job is already running (only one is supported at a time, see backend/jobs.py). `warnings` — engines from `engines` (and the detector) whose model isn't ready yet (`not_checked`/`checking`/`error` in `/models/status`); the job starts anyway. Readiness is checked **before** the job is spawned, so a slow check delays the response rather than detaching from it. `mode="crops"`, `custom`/`vlm_line`, `vote_key`, `label_votes` — see [Crops mode](#crops-mode-modecrops--cleaning-labels-of-an-existing-dataset).
 - `GET /jobs/active` → `{"job_id": str | null}` — id of the currently running job (or null); needed by the frontend to restore the progress tracker after a page reload
 - `GET /status/{job_id}` → `{"status": "running" | "done" | "error" | "cancelled", "error": str | null, "docs_found": int, "docs_processed": int, "good_count": int, "review_count": int, "diverged_count": int, "error_count": int, "errors": [str]}` — the progress tracker updates line by line as the job runs (see backend/jobs.py), not only when a whole file completes (a single Surya line can take up to ~20s to recognize); `diverged_count` — lines where 2+ engines are independently confident (score >= threshold) but disagreed on the text (see backend/consensus.py); `error_count`/`errors` — files/lines that failed with an exception or an engine timeout (see `ENGINE_CALL_TIMEOUT_SECONDS` below) — `error_count` grows unbounded, `errors` holds only the last `MAX_STORED_ERRORS` (default 50) messages
 - `POST /jobs/{job_id}/cancel` → `{"status": "cancelling"}`; 404 — unknown `job_id`, 409 — the job is no longer running. Cancellation is cooperative: the thread can't be killed directly, so the job stops at the nearest check between files/pages/lines, without losing what's already written; once stopped, `/status` will show `"status": "cancelled"`
@@ -348,3 +348,75 @@ but different text for the same box.
   (use `mode="consensus"` for text-layer PDFs).
 - `layout` strategy yields one line per line the detector found.
 - Tables/formulas are stored as plain text lines (the dataset is per-line).
+
+## Crops mode (`mode="crops"`) — cleaning labels of an existing dataset
+
+No detection and no new crops: the input is a ready **label file** of the dataset
+(`crop_path\tlabel[\tw\th]`, paths relative to `input_dir`) and the crops root.
+Each crop is read from disk, recognized by the selected engines and voted on
+(`backend/pipeline_crops.py`). Output — `good.txt` / `needs_review.txt` /
+`debug.jsonl` in `output_dir` with **the same crop paths** as in the input file:
+`good.txt` holds corrected labels for existing crops, `needs_review.txt` — lines
+without agreement (keep them out of training). Like page degradation, this is
+API-only — no UI.
+
+Crop paths in the output stay **relative to `input_dir`** (the crops root), not to
+`output_dir` — the output files sit next to no crops. To review `needs_review.txt`
+in the manual labeling mode, copy it into the crops root as `rec.txt` (the format
+is the same) and open the crops root as the working directory.
+
+```json
+POST /run
+{
+  "mode": "crops",
+  "input_dir": "/data/stroyinf",
+  "label_file": "/data/stroyinf/review_labels.txt",
+  "output_dir": "/data/stroyinf_clean",
+  "engines": ["custom", "surya", "vlm_line"],
+  "min_agree": 2,
+  "custom_model_dir": "/data/models/ru_rec/inference",
+  "line_vlm_engine": "glm_ocr",
+  "vote_key": "no_spaces",
+  "label_votes": false
+}
+```
+
+### Fields
+
+- `label_file` — required with `mode="crops"`; 400 if missing or outside `OCR_DATA_ROOT`.
+  Lines without a tab are reported in `/status` errors and skipped; a crop path
+  escaping `input_dir` (`../`, a foreign absolute path) or an unreadable image is
+  reported and the line is not written at all.
+- `engines` — now also `custom` and `vlm_line` (both also work in `mode="consensus"`):
+  - `custom` — our fine-tuned PaddleOCR export (`tools/export_model.py` →
+    `inference.json/.pdiparams/.yml`) from `custom_model_dir`; 422 without the field,
+    400 if the directory has no `inference.yml`.
+  - `vlm_line` — a VLM reads one line crop per request (up to 8 in parallel, no
+    downscaling of the crop) via the same llama.cpp endpoint (`VLM_ENDPOINT`);
+    `line_vlm_engine` ∈ `glm_ocr`, `dots_ocr`, `unlimited_ocr`, `paddleocr_vl` (422
+    otherwise). Score is `1.0` for a non-empty answer, `0.0` otherwise. `vlm_line` gets
+    its own batch time budget — `VLM_REQUEST_TIMEOUT_SECONDS` per line; the other
+    engines in the batch keep `ENGINE_CALL_TIMEOUT_SECONDS` per line and don't wait for it. A vLLM server
+    works too if `--served-model-name` matches `served_model_name` in
+    `backend/config.py::VLM_ENGINE_META` (e.g. `glm-ocr`). `paddleocr_vl` uses the
+    `"OCR:"` prompt — check it on a few crops before a long run.
+- `vote_key` — how engine texts are compared in `vote()` (`backend/text_keys.py`),
+  also for `mode="consensus"`: `exact` (default, char-by-char), `normalized`
+  (typographic variants as in `normalize_labels`, collapsed whitespace, `ё`→`е`),
+  `no_spaces` (`normalized` without spaces: `2 .5 .1` = `2.5.1`). The key only groups
+  votes — the written text is the winning engine's own text (the `preferred_model`'s
+  if it is in the winning group, otherwise the first agreeing engine's).
+- `label_votes` — the original label is one more vote (`label`, score 1.0); then
+  `min_agree` may be up to `len(engines) + 1`. Only with `mode="crops"` (422 otherwise).
+  The label vote does not count towards `diverged` (otherwise almost every line —
+  the input is exactly the model/label mismatches — would be "diverged").
+- `degrade_page_share > 0` is a 422 in this mode; `detector_engine`/PDF fields are ignored.
+
+Progress: a "document" in `/status` is a batch of `RECOGNITION_BATCH_SIZE` lines.
+`debug.jsonl` records also carry the original `"label"`. The label file is read as
+a stream (a UTF-8 BOM is fine), so its size is not limited by memory. There is no
+resume — an interrupted job restarts from the beginning.
+
+Intended cascade: run our model over the whole dataset elsewhere (Kaggle notebook),
+keep lines where it matches the label, and send only the mismatches here with
+`custom` + `surya` + `vlm_line`, 2 of 3.
